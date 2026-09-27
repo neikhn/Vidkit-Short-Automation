@@ -2,7 +2,7 @@ import React from 'react';
 import {CalculateMetadataFunction, Composition} from 'remotion';
 import {VidkitShort, VidkitShortProps} from './VidkitShort';
 
-const defaultProps: VidkitShortProps = {
+export const defaultProps: VidkitShortProps = {
   schemaVersion: 2,
   language: 'vi',
   title: 'Vidkit preview',
@@ -23,7 +23,7 @@ const defaultProps: VidkitShortProps = {
   safeArea: {top: 88, right: 150, bottom: 260, left: 64},
 };
 
-const calculateMetadata: CalculateMetadataFunction<VidkitShortProps> = ({props}) => ({
+export const calculateMetadata: CalculateMetadataFunction<VidkitShortProps> = ({props}) => ({
   durationInFrames: Math.max(1, Math.ceil(props.durationSeconds * 30)),
   props,
 });

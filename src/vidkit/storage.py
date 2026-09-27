@@ -15,7 +15,7 @@ from .models import ArtifactKind, ArtifactStatus, Mode
 
 
 STAGE_ORDER = [kind.value for kind in ArtifactKind]
-SHARED_KINDS = {ArtifactKind.SOURCE, ArtifactKind.ASSET_MANIFEST}
+SHARED_KINDS = {ArtifactKind.SOURCE, ArtifactKind.ASSET_MANIFEST, ArtifactKind.SOUND_ASSETS}
 KIND_DIRECTORIES = {
     ArtifactKind.SOURCE: "sources",
     ArtifactKind.ASSET_MANIFEST: "assets",
@@ -25,6 +25,9 @@ KIND_DIRECTORIES = {
     ArtifactKind.TRANSCRIPT: "transcripts",
     ArtifactKind.STORYBOARD: "storyboard",
     ArtifactKind.CAPTION_PLAN: "subtitles",
+    ArtifactKind.SOUND_PLAN: "audio/sound-plan",
+    ArtifactKind.SOUND_ASSETS: "audio-assets",
+    ArtifactKind.AUDIO_MIX: "audio/mix",
     ArtifactKind.TIMELINE: "storyboard",
     ArtifactKind.SUBTITLE_SRT: "subtitles",
     ArtifactKind.SUBTITLE_VTT: "subtitles",
@@ -130,7 +133,7 @@ class Workspace:
         languages: Iterable[str],
         mode: Mode = Mode.REVIEW,
         source_url: str | None = None,
-        workflow_version: int = 3,
+        workflow_version: int = 4,
     ) -> str:
         self.initialize()
         job_id = uuid.uuid4().hex[:12]
@@ -290,14 +293,17 @@ class Workspace:
         )
 
     def invalidate_downstream(self, job_id: str, language: str, changed_kind: ArtifactKind) -> None:
-        if changed_kind in {ArtifactKind.BRIEF, ArtifactKind.CAPTION_PLAN, ArtifactKind.STORYBOARD}:
+        if changed_kind in {ArtifactKind.BRIEF, ArtifactKind.CAPTION_PLAN, ArtifactKind.STORYBOARD,
+                            ArtifactKind.SOUND_PLAN, ArtifactKind.SOUND_ASSETS}:
             downstream = [kind.value for kind in (
                 ArtifactKind.TIMELINE, ArtifactKind.SUBTITLE_SRT, ArtifactKind.SUBTITLE_VTT,
-                ArtifactKind.PREVIEW, ArtifactKind.QA_REPORT, ArtifactKind.RENDER,
+                ArtifactKind.AUDIO_MIX, ArtifactKind.PREVIEW, ArtifactKind.QA_REPORT, ArtifactKind.RENDER,
             )]
         else:
             index = STAGE_ORDER.index(changed_kind.value)
-            downstream = [kind for kind in STAGE_ORDER[index + 1 :] if kind != ArtifactKind.APPROVAL.value]
+            downstream = [kind for kind in STAGE_ORDER[index + 1 :]
+                          if kind not in {ArtifactKind.APPROVAL.value, ArtifactKind.SOUND_ASSETS.value,
+                                          ArtifactKind.SOUND_PLAN.value}]
         if not downstream:
             return
         placeholders = ",".join("?" for _ in downstream)
@@ -316,6 +322,7 @@ class Workspace:
             elif changed_kind in {ArtifactKind.AUDIO, ArtifactKind.TRANSCRIPT,
                                   ArtifactKind.ASSET_MANIFEST, ArtifactKind.STORYBOARD,
                                   ArtifactKind.CAPTION_PLAN, ArtifactKind.TIMELINE,
+                                  ArtifactKind.SOUND_PLAN, ArtifactKind.SOUND_ASSETS,
                                   ArtifactKind.PREVIEW, ArtifactKind.QA_REPORT}:
                 approval_stages = ("export",)
             else:

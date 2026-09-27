@@ -13,13 +13,62 @@ from vidkit.storage import Workspace, sha256_file
 from vidkit.workflow import approve, current_approval, make_qa
 from vidkit import library
 from vidkit.timeline import compile_storyboard
+from vidkit.render import prepare_renderer_job
 
 
 class V3WorkflowTests(unittest.TestCase):
+    def test_renderer_copies_secondary_scene_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = Workspace(root)
+            workspace.initialize()
+            assets = workspace.workspace_root / "assets"
+            assets.mkdir(parents=True)
+            article = assets / "article.png"
+            portrait = assets / "portrait.png"
+            Image.new("RGB", (20, 20)).save(article)
+            Image.new("RGB", (20, 20)).save(portrait)
+            narration = root / "narration.mp3"
+            narration.write_bytes(b"audio fixture")
+            timeline = {"scenes": [{"asset": {"path": "assets/article.png", "sha256": sha256_file(article)},
+                                    "supportAssets": [{"path": "assets/portrait.png", "sha256": sha256_file(portrait)}]}]}
+            props_path = prepare_renderer_job(workspace, "job", "en", timeline, narration)
+            props = json.loads(props_path.read_text(encoding="utf8"))
+            secondary = props["scenes"][0]["supportAssets"][0]
+            self.assertTrue((root / "renderer" / "public" / secondary["src"]).is_file())
+
+    def test_storyboard_support_asset_is_resolved_and_required(self):
+        transcript = {"words": [{"text": "Founder", "start": 0.1, "end": 0.4}]}
+        scene = {"id": "article", "layout": "screenshot-focus", "title": "Founder",
+                 "assetId": "article", "supportAssetIds": ["portrait"],
+                 "startAnchor": {"wordIndex": 0}, "endAnchor": {"wordIndex": 0}}
+        storyboard = {"schemaVersion": 3, "theme": "dark-grid", "scenes": [scene]}
+        article = {"id": "article", "path": "article.png", "width": 1000, "height": 1000}
+        portrait = {"id": "portrait", "path": "portrait.png", "width": 720, "height": 720}
+        timeline, missing = compile_storyboard(transcript, storyboard,
+                                               {"assets": [article, portrait]}, "Founder", "en", "audio.wav")
+        self.assertFalse(missing)
+        self.assertEqual(timeline["scenes"][0]["supportAssets"], [portrait])
+        _, missing = compile_storyboard(transcript, storyboard, {"assets": [article]},
+                                        "Founder", "en", "audio.wav")
+        self.assertIn("portrait", missing)
+
+    def test_storyboard_whoosh_uses_word_anchor(self):
+        transcript = {"words": [{"text": "Hello", "start": 0.1, "end": 0.3},
+                                {"text": "world.", "start": 0.5, "end": 0.8}]}
+        storyboard = {"schemaVersion": 3, "theme": "dark-grid",
+                      "scenes": [{"id": "one", "layout": "takeaway", "title": "Hello",
+                                  "startAnchor": {"wordIndex": 0}, "endAnchor": {"wordIndex": 1}}],
+                      "sfx": [{"type": "whoosh", "wordIndex": 1}]}
+        timeline, missing = compile_storyboard(transcript, storyboard, {"assets": []},
+                                               "Hello", "en", "audio.wav")
+        self.assertFalse(missing)
+        self.assertEqual(timeline["sfx"], [{"type": "whoosh", "wordIndex": 1, "atMs": 500}])
+
     def test_concept_and_export_approvals_are_revision_bound(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Workspace(Path(directory))
-            job = workspace.create_job("Example", ["en"])
+            job = workspace.create_job("Example", ["en"], workflow_version=3)
             self.assertEqual(workspace.get_job(job)["workflow_version"], 3)
             workspace.add_json_artifact(job, "en", K.SCRIPT, {"tts_input": "One"}, S.CHECKED)
             workspace.add_json_artifact(job, "en", K.BRIEF, {"theme": "dark-grid"}, S.CHECKED)

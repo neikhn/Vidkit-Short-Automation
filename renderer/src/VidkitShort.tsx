@@ -1,7 +1,9 @@
 import React from 'react';
+import {SoundTracks, type SoundTrack} from './SoundTracks';
 import {Audio} from '@remotion/media';
 import {AnimatedCounter, AnimatedText, GradientTransition} from 'remotion-bits';
 import libraryManifest from '../library/manifest.json';
+import {JevVisual} from './JevVisuals';
 import {
   AbsoluteFill,
   continueRender,
@@ -21,9 +23,9 @@ type Asset = {id: string; src?: string; description?: string; width?: number; he
 type Crop = {x: number; y: number; width: number; height: number};
 type Callout = {text?: string; x?: number; y?: number};
 type SafeArea = {top: number; right: number; bottom: number; left: number};
-type Scene = {
+export type Scene = {
   id: string;
-  layout: 'hook' | 'screenshot' | 'steps' | 'takeaway' | 'brand-hook' | 'screenshot-focus' | 'api-response' | 'diagram-flow' | 'metric-breakdown';
+  layout: 'custom' | 'hook' | 'screenshot' | 'steps' | 'takeaway' | 'brand-hook' | 'screenshot-focus' | 'api-response' | 'diagram-flow' | 'metric-breakdown';
   purpose?: string;
   title: string;
   body: string;
@@ -31,13 +33,21 @@ type Scene = {
   endMs: number;
   status?: string;
   asset?: Asset | null;
+  supportAssets?: Asset[];
   assetRequired?: boolean;
   crop?: Crop;
   callout?: Callout | null;
   component?: string;
+  componentId?: string;
+  componentProps?: Record<string, unknown>;
+  absoluteStartFrame?: number;
+  events?: Array<{id: string; entityId: string; atFrame: number; endFrame: number}>;
+  entities?: Array<{id: string; label?: string}>;
+  continuityGroup?: string;
+  continuityStartFrame?: number;
   componentVersion?: string;
   claimIds?: string[];
-  motion?: {cues?: Array<{atMs: number; type?: string}>; zoomTo?: number};
+  motion?: {cues?: Array<{atMs: number; type?: string}>; zoomTo?: number; mode?: string};
 };
 
 const labels = {
@@ -50,18 +60,22 @@ export type VidkitShortProps = {
   language: string;
   title: string;
   audioSrc: string;
+  soundTracks?: SoundTrack[];
+  audioSegments?: Array<{startMs: number; endMs: number; sourceStartMs: number}>;
   durationSeconds: number;
   captions: Caption[];
   scenes: Scene[];
   safeArea?: SafeArea;
   theme?: string;
   themeData?: Theme;
+  sfx?: Array<{type: 'whoosh'; atMs: number}>;
+  visualRegistry?: Record<string, React.ComponentType<{scene: Scene; theme: Theme}>>;
 };
 
 const defaultSafeArea: SafeArea = {top: 88, right: 150, bottom: 260, left: 64};
 const nfc = (value: string | undefined) => (value ?? '').normalize('NFC');
 
-type Theme = {
+export type Theme = {
   background: string; surface: string; text: string; muted: string; accent: string; pattern: string;
   typography: {headlineSize: number; captionSize: number};
   motionIntensity: number;
@@ -294,6 +308,7 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
     return cue ? Math.max(0, (cue.atMs - scene.startMs) / 1000 * fps) :
       index * Math.min(10, durationFrames * .62 / Math.max(1, total - 1));
   };
+  if (scene.motion?.mode?.startsWith('jev-')) return <JevVisual scene={scene} theme={theme} />;
   if (layout === 'brand-hook') {
     return <AbsoluteFill style={{padding: '250px 70px 410px', justifyContent: 'center', ...reveal}}>
       {scene.asset?.src ? <div style={{width: 300, height: 300, marginBottom: 55, borderRadius: 48, overflow: 'hidden', background: theme.surface,
@@ -333,6 +348,33 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
   }
   if (layout === 'diagram-flow') {
     const steps = scene.body.split(/(?:→|\n)/).map((part) => part.trim()).filter(Boolean).slice(0, 4);
+    if (scene.motion?.mode === 'parallel') {
+      return <AbsoluteFill style={{padding: '195px 65px 390px', justifyContent: 'center', ...reveal}}>
+        <div style={titleStyle}>{nfc(scene.title)}</div>
+        <div style={{marginTop: 50, padding: '28px 32px', borderRadius: 24, border: `2px solid ${theme.accent}`, color: theme.text,
+          background: theme.surface, fontSize: 37, fontWeight: 800, textAlign: 'center'}}>ONE EMAIL</div>
+        <div style={{height: 68, width: 3, background: theme.accent, margin: '0 auto'}} />
+        <div style={{display: 'grid', gap: 20}}>{steps.map((step, index) => <div key={index} style={{display: 'flex', gap: 16, alignItems: 'center',
+          opacity: interpolate(frame, [revealAt(index, steps.length), revealAt(index, steps.length) + 7], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'})}}>
+          <div style={{width: 44, height: 3, background: theme.accent}} />
+          <div style={{flex: 1, borderRadius: 22, background: theme.surface, padding: '30px 28px', fontSize: 38, fontWeight: 750,
+            borderLeft: `7px solid ${theme.accent}`}}>{nfc(step)}</div>
+        </div>)}</div>
+        <div style={{fontSize: 26, color: theme.muted, marginTop: 28, textAlign: 'center'}}>PARALLEL PASS</div>
+      </AbsoluteFill>;
+    }
+    if (scene.motion?.mode === 'token-chain') {
+      return <AbsoluteFill style={{padding: '235px 70px 390px', justifyContent: 'center', ...reveal}}>
+        <div style={titleStyle}>{nfc(scene.title)}</div>
+        <div style={{marginTop: 90, display: 'flex', alignItems: 'center', gap: 12}}>{steps.map((step, index) => <React.Fragment key={index}>
+          {index > 0 ? <div style={{fontSize: 40, color: theme.accent}}>→</div> : null}
+          <div style={{minWidth: 0, flex: 1, padding: '30px 9px', borderRadius: 19, background: theme.surface, color: theme.text,
+            textAlign: 'center', fontSize: 27, fontWeight: 800, opacity: interpolate(frame,
+              [revealAt(index, steps.length), revealAt(index, steps.length) + 7], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'})}}>{nfc(step)}</div>
+        </React.Fragment>)}</div>
+        <div style={{marginTop: 55, color: theme.muted, fontSize: 30}}>Each token waits on the previous one.</div>
+      </AbsoluteFill>;
+    }
     return <AbsoluteFill style={{padding: '180px 70px 390px', justifyContent: 'center', ...reveal}}>
       <div style={titleStyle}>{nfc(scene.title)}</div>
       <div style={{marginTop: 60, display: 'grid', gap: 34}}>{steps.map((step, index) =>
@@ -346,13 +388,14 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
   }
   if (layout === 'metric-breakdown') {
     const metric = scene.title.match(/[\d,.]+\s?(?:%|ms|s|tokens|million|billion)?/i)?.[0];
+    const range = /\d\s*[–-]\s*\d/.test(scene.title) || scene.title.includes('$');
     return <AbsoluteFill style={{padding: '220px 76px 405px', justifyContent: 'center', ...reveal}}>
-      {metric ? <div style={{fontSize: 132, fontWeight: 900, color: theme.accent, lineHeight: 1}}>
+      {range ? <div style={{fontSize: 112, fontWeight: 900, color: theme.accent, lineHeight: 1.1}}>{nfc(scene.title)}</div> : metric ? <div style={{fontSize: 132, fontWeight: 900, color: theme.accent, lineHeight: 1}}>
         <AnimatedCounter transition={{values: [0, Number.parseFloat(metric.replace(/,/g, ''))], duration: 34}}
           toFixed={metric.includes('.') ? metric.split('.')[1].match(/^\d+/)?.[0].length ?? 0 : 0}
           postfix={metric.match(/[^\d,.].*$/)?.[0] ?? ''} />
       </div> : null}
-      <div style={{...titleStyle, marginTop: 35}}>{nfc(scene.title)}</div>
+      {!range && !metric ? <div style={{...titleStyle, marginTop: 35}}>{nfc(scene.title)}</div> : null}
       {scene.body ? <div style={{...bodyStyle, marginTop: 30}}>{nfc(scene.body)}</div> : null}
       {scene.asset?.src ? <div style={{marginTop: 45}}><FocusImage scene={scene} theme={theme} height={500} /></div> : null}
     </AbsoluteFill>;
@@ -473,11 +516,26 @@ export const VidkitShort: React.FC<VidkitShortProps> = (props) => {
       /> : null}
       <AbsoluteFill style={isV3 ? {backgroundImage: theme.pattern, backgroundSize: '76px 76px', opacity: .75} :
         {opacity: 0.45, backgroundImage: 'radial-gradient(circle at 12% 10%, rgba(22,119,255,.12), transparent 28%), radial-gradient(circle at 90% 60%, rgba(80,145,255,.10), transparent 32%)'}} />
-      {props.audioSrc ? <Audio src={staticFile(props.audioSrc)} /> : null}
+      {props.audioSrc ? props.audioSegments ? props.audioSegments.map((segment, index) =>
+        <Sequence key={`audio-${index}`} from={Math.round(segment.startMs * fps / 1000)}
+          durationInFrames={Math.max(1, Math.round((segment.endMs - segment.startMs) * fps / 1000))}>
+          <Audio src={staticFile(props.audioSrc)} trimBefore={Math.round(segment.sourceStartMs * fps / 1000)} />
+        </Sequence>) : <Audio src={staticFile(props.audioSrc)} volume={props.soundTracks?.some((track) => (track.src?.includes('jobs/0e00e47bb788/') || track.src?.includes('jobs/e5fb0399b313/')) && track.id.startsWith('editorial-underscore')) ? 0.8 : 1} /> : null}
+      {props.soundTracks ? <SoundTracks tracks={props.soundTracks} /> : null}
+      {props.sfx?.filter((cue) => cue.type === 'whoosh').map((cue, index) => <Sequence
+        key={`sfx-${index}`}
+        from={Math.max(0, Math.round(cue.atMs / 1000 * fps))}
+        durationInFrames={Math.round(fps * .36)}
+      >
+        <Audio src={staticFile('sfx/whoosh.wav')} volume={.16} />
+      </Sequence>)}
       {props.scenes.map((scene) => {
         const from = Math.max(0, Math.floor((scene.startMs / 1000) * fps));
         const duration = Math.max(1, Math.ceil(((scene.endMs - scene.startMs) / 1000) * fps));
-        return <Sequence key={scene.id} from={from} durationInFrames={duration} premountFor={Math.min(fps, from)}><SceneView scene={scene} language={props.language} theme={theme} isV3={isV3} /></Sequence>;
+        const Custom = props.visualRegistry?.[scene.componentId ?? scene.component ?? ''];
+        return <Sequence key={scene.id} from={from} durationInFrames={duration} premountFor={Math.min(fps, from)}>
+          {Custom ? <Custom scene={scene} theme={theme} /> : <SceneView scene={scene} language={props.language} theme={theme} isV3={isV3} />}
+        </Sequence>;
       })}
       <Captions captions={props.captions} safeArea={safeArea} theme={theme} isV3={isV3} />
       {!isV3 ? <div style={{position: 'absolute', top: safeArea.top, left: safeArea.left, fontSize: 22, fontWeight: 800, letterSpacing: 1.4, color: '#718096'}}>VIDKIT · {props.language.toUpperCase()}</div> : null}

@@ -9,3 +9,4 @@ __pycache__/
 renderer/node_modules/
 renderer/out/
 renderer/public/jobs/
+renderer/src/.vidkit-generated/

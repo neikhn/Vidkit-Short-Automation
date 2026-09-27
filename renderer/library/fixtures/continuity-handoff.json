@@ -1,0 +1,1 @@
+{"schemaVersion":4,"language":"en","title":"Continuity handoff","audioSrc":"","durationSeconds":5,"captions":[],"theme":"dark-contours","scenes":[{"id":"handoff","layout":"custom","componentId":"continuity-handoff","title":"Follow the same result","body":"","startMs":0,"endMs":5000,"componentProps":{"label":"Decision","destination":"Next: downstream action"}}]}

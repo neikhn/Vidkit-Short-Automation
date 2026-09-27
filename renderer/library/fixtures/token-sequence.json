@@ -1,0 +1,1 @@
+{"schemaVersion":4,"language":"en","title":"Token sequence","audioSrc":"","durationSeconds":5,"captions":[],"theme":"dark-contours","scenes":[{"id":"tokens","layout":"custom","componentId":"token-sequence","title":"One token at a time","body":"","startMs":0,"endMs":5000,"componentProps":{"tokens":["Input","Model","Choice","Output"]}}]}

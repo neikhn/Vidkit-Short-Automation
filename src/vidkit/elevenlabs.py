@@ -68,7 +68,31 @@ class ElevenLabsClient:
             raise ElevenLabsError("Unexpected STT response")
         return payload
 
-    def _request(self, path: str, body: bytes, content_type: str, accept: str) -> bytes:
+    def sound_effect(self, text: str, output: Path, *, duration_seconds: float = 1.0,
+                     prompt_influence: float = 0.3, loop: bool = False,
+                     model_id: str = "eleven_text_to_sound_v2") -> None:
+        if not text.strip() or not 0.5 <= duration_seconds <= 30 or not 0 <= prompt_influence <= 1:
+            raise ValueError("SFX needs text, duration 0.5–30 seconds and prompt influence 0–1")
+        self._audio_request("/v1/sound-generation", {"text": text, "duration_seconds": duration_seconds,
+                            "prompt_influence": prompt_influence, "loop": loop, "model_id": model_id}, output)
+
+    def compose_music(self, prompt: str, output: Path, *, music_length_ms: int,
+                      model_id: str = "music_v2_5", force_instrumental: bool = True) -> None:
+        if not prompt.strip() or len(prompt) > 4100 or not 3000 <= music_length_ms <= 600000:
+            raise ValueError("Music needs prompt <=4100 characters and duration 3000–600000 ms")
+        self._audio_request("/v1/music", {"prompt": prompt, "music_length_ms": music_length_ms,
+                            "model_id": model_id, "force_instrumental": force_instrumental}, output)
+
+    def _audio_request(self, endpoint: str, payload: dict[str, Any], output: Path) -> None:
+        response = self._request(endpoint + "?output_format=mp3_44100_128",
+                                 json.dumps(payload).encode("utf-8"), "application/json", "audio/mpeg",
+                                 timeout=600 if endpoint == "/v1/music" else 180)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        pending = output.with_suffix(output.suffix + ".part")
+        pending.write_bytes(response)
+        pending.replace(output)
+
+    def _request(self, path: str, body: bytes, content_type: str, accept: str, timeout: int = 180) -> bytes:
         request = Request(
             self.base_url + path,
             data=body,
@@ -81,7 +105,7 @@ class ElevenLabsClient:
             },
         )
         try:
-            with urlopen(request, timeout=180) as response:
+            with urlopen(request, timeout=timeout) as response:
                 return response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")

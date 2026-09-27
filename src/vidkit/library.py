@@ -45,6 +45,13 @@ def entries(workspace: Workspace) -> list[dict[str, Any]]:
         if item["status"] == "candidate" or item.get("kind") == "asset":
             result.append(item)
     for item in result:
+        if item.get("entrypoint") and item.get("codePath"):
+            base = (workspace.workspace_root if item.get("codeLocation") == "workspace" else
+                    workspace.project_root / "renderer/library") / item["codePath"]
+            item["entrypointAbsolute"] = str((base / item["entrypoint"]).resolve())
+            item["sourcePaths"] = [str((base / name).resolve()) for name in item.get("files", [])]
+            item["sourceChecksums"] = {name: sha256_file(base / name) if (base / name).is_file() else None
+                                       for name in item.get("files", [])}
         if item.get("status") == "candidate" and item.get("kind") in {"component", "theme"}:
             item["previewValid"] = candidate_preview_valid(workspace, item)
         if item.get("kind") == "asset":
@@ -58,7 +65,8 @@ def checksum(entry: dict[str, Any]) -> str:
     stable = {key: value for key, value in entry.items() if key not in {
         "sha256", "manifestSha256", "status", "approvedBy", "preview",
         "fixtureSha256", "previewImage", "previewSha256", "previewManifestSha256", "checkedAt",
-        "previewValid",
+        "previewValid", "previewClip", "previewClipSha256",
+        "entrypointAbsolute", "sourcePaths",
     }}
     return hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -69,13 +77,17 @@ def candidate_preview_valid(workspace: Workspace, item: dict[str, Any]) -> bool:
         return False
     fixture = workspace.workspace_root / item.get("preview", "")
     image = workspace.workspace_root / item.get("previewImage", "")
+    clip = workspace.workspace_root / item.get("previewClip", "") if item.get("entrypoint") else None
     return (fixture.is_file() and image.is_file()
             and sha256_file(fixture) == item["fixtureSha256"]
-            and sha256_file(image) == item["previewSha256"])
+            and sha256_file(image) == item["previewSha256"]
+            and (clip is None or (clip.is_file() and sha256_file(clip) == item.get("previewClipSha256"))))
 
 
-def locks_match(workspace: Workspace, timeline: dict[str, Any]) -> bool:
-    current = {(item["id"], item["version"]): item["sha256"] for item in entries(workspace)}
+def locks_match(workspace: Workspace, timeline: dict[str, Any],
+                extra_entries: list[dict[str, Any]] | None = None) -> bool:
+    current = {(item["id"], item["version"]): item["sha256"]
+               for item in [*entries(workspace), *(extra_entries or [])]}
     locks = [*timeline.get("componentLocks", []), *timeline.get("effectLocks", [])]
     if timeline.get("themeLock"):
         locks.append(timeline["themeLock"])
@@ -126,7 +138,7 @@ def add_candidate(workspace: Workspace, source: Path) -> dict[str, Any]:
         raise ValueError("Unsupported library entry kind")
     if item["kind"] == "component":
         builtin_ids = {entry["id"] for entry in _builtins(workspace) if entry["kind"] == "component"}
-        if item.get("baseComponent") not in builtin_ids:
+        if not item.get("entrypoint") and item.get("baseComponent") not in builtin_ids:
             raise ValueError("Candidate component requires a tested baseComponent from the built-in registry")
     if item["kind"] == "theme":
         style = item.get("style", {})
@@ -153,13 +165,14 @@ def add_candidate(workspace: Workspace, source: Path) -> dict[str, Any]:
         if not fixture.is_file() or fixture.suffix.lower() != ".json":
             raise ValueError("Candidate preview must point to an existing JSON fixture")
         fixture_data = json.loads(fixture.read_text(encoding="utf-8"))
-        if fixture_data.get("schemaVersion") != 3 or not fixture_data.get("scenes") or fixture_data.get("durationSeconds", 0) <= 0:
-            raise ValueError("Candidate fixture must be a v3 Remotion props JSON with scenes and duration")
+        if fixture_data.get("schemaVersion") not in {3, 4} or not fixture_data.get("scenes") or fixture_data.get("durationSeconds", 0) <= 0:
+            raise ValueError("Candidate fixture must be a v3/v4 Remotion props JSON with scenes and duration")
+        expected_component = item["id"] if item.get("entrypoint") else item.get("baseComponent")
         if item["kind"] == "component" and not any(
-            scene.get("component", scene.get("layout")) == item["baseComponent"]
+            scene.get("componentId", scene.get("component", scene.get("layout"))) == expected_component
             for scene in fixture_data["scenes"]
         ):
-            raise ValueError("Candidate fixture must show its baseComponent")
+            raise ValueError("Candidate fixture must show its component")
         if item["kind"] == "theme" and (
             fixture_data.get("theme") != item["id"] or fixture_data.get("themeData") != item["style"]
         ):
@@ -168,6 +181,24 @@ def add_candidate(workspace: Workspace, source: Path) -> dict[str, Any]:
         fixture_target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(fixture, fixture_target)
         item["preview"] = fixture_target.relative_to(workspace.workspace_root).as_posix()
+        if item.get("entrypoint"):
+            from .checkpoints import dependency_files
+            source_root = source.parent.resolve()
+            source_entry = (source_root / item["entrypoint"]).resolve()
+            if not source_entry.is_relative_to(source_root):
+                raise ValueError("Component entrypoint escapes package")
+            files = dependency_files(workspace, [source_entry], extra_root=source_root)
+            if not files or any(not file.is_relative_to(source_root) for file in files):
+                raise ValueError("Component imports must remain inside package")
+            code_root = _candidate_dir(workspace) / "code" / f"{slugify(item['id'])}-{slugify(item['version'])}"
+            code_root.mkdir(parents=True, exist_ok=False)
+            for file in files:
+                destination = code_root / file.relative_to(source_root)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(file, destination)
+            item["files"] = [file.relative_to(source_root).as_posix() for file in files]
+            item["codePath"] = code_root.relative_to(workspace.workspace_root).as_posix()
+            item["codeLocation"] = "workspace"
     target = _candidate_dir(workspace) / f"{slugify(item['id'])}-{slugify(item['version'])}.json"
     target.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
     return item
@@ -208,12 +239,28 @@ def preview(workspace: Workspace, entry_id: str) -> Path | str:
         raise FileNotFoundError(f"Library fixture missing: {item['preview']}")
     target = workspace.workspace_root / "library" / "previews" / f"{slugify(item['id'])}-{slugify(item['version'])}.png"
     target.parent.mkdir(parents=True, exist_ok=True)
-    command = [*remotion_command(workspace.project_root), "still", "src/index.ts", "VidkitShort",
+    entrypoint = "src/index.ts"
+    if item.get("entrypoint"):
+        from .visuals import render_entry
+        entrypoint = str(render_entry(workspace, "library", item["id"],
+                                      json.loads(fixture.read_text(encoding="utf-8")), [item]))
+    command = [*remotion_command(workspace.project_root), "still", entrypoint, "VidkitShort",
                str(target), "--props", str(fixture), "--frame", "30", "--scale", "0.333", "--overwrite"]
     result = subprocess.run(command, cwd=workspace.project_root / "renderer", check=False)
     if result.returncode != 0:
         raise RuntimeError(f"Library preview render failed: {result.returncode}")
+    clip = None
+    if item.get("entrypoint"):
+        clip = target.with_suffix(".mp4")
+        motion = [*remotion_command(workspace.project_root), "render", entrypoint, "VidkitShort",
+                  str(clip), "--props", str(fixture), "--scale", "0.5", "--overwrite"]
+        result = subprocess.run(motion, cwd=workspace.project_root / "renderer", check=False)
+        if result.returncode:
+            raise RuntimeError(f"Component motion preview failed: {result.returncode}")
     if item["status"] == "candidate":
+        if clip:
+            item["previewClip"] = clip.relative_to(workspace.workspace_root).as_posix()
+            item["previewClipSha256"] = sha256_file(clip)
         item["fixtureSha256"] = sha256_file(fixture)
         item["previewImage"] = target.relative_to(workspace.workspace_root).as_posix()
         item["previewSha256"] = sha256_file(target)
@@ -236,7 +283,10 @@ def approve(workspace: Workspace, entry_id: str, reviewer: str) -> dict[str, Any
     target = _candidate_dir(workspace) / f"{slugify(item['id'])}-{slugify(item['version'])}.json"
     item["status"] = "approved"
     item["approvedBy"] = reviewer
-    target.write_text(json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+    persisted = {key: value for key, value in item.items() if key not in {
+        "entrypointAbsolute", "sourcePaths", "sourceChecksums", "sha256", "previewValid"
+    }}
+    target.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
     if item["kind"] == "asset":
         return {**item, "approvedLocation": item["path"]}
     approved = workspace.project_root / "renderer" / "library" / "approved"
@@ -245,7 +295,15 @@ def approve(workspace: Workspace, entry_id: str, reviewer: str) -> dict[str, Any
     fixture_target = approved / "fixtures" / fixture_source.name
     fixture_target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(fixture_source, fixture_target)
-    approved_item = {**item, "preview": fixture_target.relative_to(workspace.project_root / "renderer" / "library").as_posix()}
+    approved_item = {**persisted, "preview": fixture_target.relative_to(workspace.project_root / "renderer" / "library").as_posix()}
+    if item.get("entrypoint"):
+        code_source = workspace.workspace_root / item["codePath"]
+        code_target = approved / "code" / f"{slugify(item['id'])}-{slugify(item['version'])}"
+        if code_target.exists():
+            raise ValueError("Approved component version already exists")
+        shutil.copytree(code_source, code_target)
+        approved_item["codePath"] = code_target.relative_to(workspace.project_root / "renderer/library").as_posix()
+        approved_item["codeLocation"] = "renderer"
     approved_manifest = approved / target.name
     approved_manifest.write_text(json.dumps(approved_item, ensure_ascii=False, indent=2), encoding="utf-8")
     return {**item, "approvedManifest": str(approved_manifest), "approvedFixture": str(fixture_target)}

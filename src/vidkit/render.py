@@ -34,50 +34,61 @@ def prepare_renderer_job(
     job_id: str,
     language: str,
     timeline: dict[str, Any],
-    audio_path: Path,
+    audio_path: Path | None,
 ) -> Path:
     public_dir = workspace.project_root / "renderer" / "public" / "jobs" / job_id / language
     public_dir.mkdir(parents=True, exist_ok=True)
-    audio_target = public_dir / f"narration{audio_path.suffix.lower()}"
-    shutil.copy2(audio_path, audio_target)
     props = deepcopy(timeline)
-    props["audioSrc"] = f"jobs/{job_id}/{language}/{audio_target.name}"
+    if audio_path:
+        audio_target = public_dir / f"narration{audio_path.suffix.lower()}"
+        shutil.copy2(audio_path, audio_target)
+        props["audioSrc"] = f"jobs/{job_id}/{language}/{audio_target.name}"
+    else:
+        props["audioSrc"] = ""
     assets_dir = public_dir / "assets"
-    for scene in props.get("scenes", []):
-        asset = scene.get("asset")
-        if not asset or not asset.get("path"):
-            continue
+    for track in props.get("soundTracks", []):
+        asset = track["asset"]
         source = workspace.resolve_path(asset["path"])
-        if not source.is_file():
-            scene["asset"] = None
-            scene["status"] = "blocked"
-            continue
-        if asset.get("sha256") and sha256_file(source) != asset["sha256"]:
-            raise RenderDependencyError(f"Asset checksum mismatch: {asset.get('id', source.name)}")
-        assets_dir.mkdir(parents=True, exist_ok=True)
-        target = assets_dir / source.name
-        shutil.copy2(source, target)
-        asset["src"] = f"jobs/{job_id}/{language}/assets/{target.name}"
+        if not source.is_file() or sha256_file(source) != asset["sha256"]:
+            raise RenderDependencyError(f"Sound asset missing or checksum mismatch: {asset['id']}")
+        destination = public_dir / "sound" / (asset["sha256"] + source.suffix.lower())
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        track["src"] = f"jobs/{job_id}/{language}/sound/{destination.name}"
+    for scene in props.get("scenes", []):
+        for asset in [scene.get("asset"), *scene.get("supportAssets", [])]:
+            if not asset or not asset.get("path"):
+                continue
+            source = workspace.resolve_path(asset["path"])
+            if not source.is_file():
+                scene["status"] = "blocked"
+                continue
+            if asset.get("sha256") and sha256_file(source) != asset["sha256"]:
+                raise RenderDependencyError(f"Asset checksum mismatch: {asset.get('id', source.name)}")
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            target = assets_dir / source.name
+            shutil.copy2(source, target)
+            asset["src"] = f"jobs/{job_id}/{language}/assets/{target.name}"
     props_path = public_dir / "props.json"
     props_path.write_text(json.dumps(props, ensure_ascii=False, indent=2), encoding="utf-8")
     return props_path
 
 
-def run_studio(project_root: Path, props_path: Path, output_path: Path) -> int:
+def run_studio(project_root: Path, props_path: Path, output_path: Path, entrypoint: Path | None = None) -> int:
     command = remotion_command(project_root)
     renderer = project_root / "renderer"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
     environment["VIDKIT_STUDIO_OUTPUT"] = str(output_path.resolve())
     return subprocess.run(
-        [*command, "studio", "src/index.ts", "--props", str(props_path)],
+        [*command, "studio", str(entrypoint or "src/index.ts"), "--props", str(props_path)],
         cwd=renderer,
         env=environment,
         check=False,
     ).returncode
 
 
-def run_render(project_root: Path, props_path: Path, output: Path) -> int:
+def run_render(project_root: Path, props_path: Path, output: Path, entrypoint: Path | None = None) -> int:
     command = remotion_command(project_root)
     renderer = project_root / "renderer"
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +96,7 @@ def run_render(project_root: Path, props_path: Path, output: Path) -> int:
         [
             *command,
             "render",
-            "src/index.ts",
+            str(entrypoint or "src/index.ts"),
             "VidkitShort",
             str(output),
             "--props",

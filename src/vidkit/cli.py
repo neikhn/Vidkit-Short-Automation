@@ -16,7 +16,7 @@ from .media import audio_duration
 from .models import ArtifactKind, ArtifactStatus, Mode
 from .render import prepare_renderer_job, remotion_command, run_render, run_studio
 from .runtime import resolve_node
-from . import library, workflow
+from . import checkpoints, library, sound, visuals, workflow
 from .script_bundle import validate_script_bundle
 from .storage import Workspace, sha256_file, slugify
 from .subtitles import render_srt, render_vtt
@@ -57,8 +57,68 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--languages", default="vi,en")
     create.add_argument("--mode", choices=[mode.value for mode in Mode], default=Mode.REVIEW.value)
     create.add_argument("--source-url")
-    create.add_argument("--workflow-version", type=int, choices=[2, 3], default=3,
+    create.add_argument("--workflow-version", type=int, choices=[2, 3, 4], default=4,
                         help=argparse.SUPPRESS)
+
+    for name in ("checkpoint", "diff"):
+        command = sub.add_parser(name)
+        command.add_argument("job_id")
+        command.add_argument("language")
+
+    add_visual = sub.add_parser("add-visual")
+    add_visual.add_argument("job_id")
+    add_visual.add_argument("language")
+    add_visual.add_argument("file", type=Path)
+    sound_plan = sub.add_parser("add-sound-plan")
+    sound_plan.add_argument("job_id")
+    sound_plan.add_argument("language")
+    sound_plan.add_argument("file", type=Path)
+    for name in ("sfx", "music"):
+        audio_gen = sub.add_parser(name)
+        audio_gen.add_argument("action", choices=["generate"])
+        audio_gen.add_argument("job_id")
+        audio_gen.add_argument("language")
+        if name == "sfx":
+            audio_gen.add_argument("--cue", required=True)
+        audio_gen.add_argument("--new-take", action="store_true", help="Explicitly generate another take")
+    audio_parser = sub.add_parser("audio")
+    audio_commands = audio_parser.add_subparsers(dest="audio_command", required=True)
+    audio_commands.add_parser("reindex")
+    audio_import = audio_commands.add_parser("import")
+    audio_import.add_argument("job_id")
+    audio_import.add_argument("file", type=Path)
+    audio_import.add_argument("--asset-id", required=True)
+    audio_import.add_argument("--kind", choices=["sfx", "music"], required=True)
+    audio_import.add_argument("--description", required=True)
+    audio_import.add_argument("--source", required=True)
+    audio_import.add_argument("--usage-basis", required=True)
+    audio_share = audio_commands.add_parser("share")
+    audio_share.add_argument("job_id")
+    audio_share.add_argument("asset_id")
+    audio_share.add_argument("--purpose", required=True)
+    audio_reuse = audio_commands.add_parser("reuse")
+    audio_reuse.add_argument("job_id")
+    audio_reuse.add_argument("entry_id")
+    audio_reuse.add_argument("--asset-id", required=True)
+    for name in ("preview", "requests", "recover"):
+        audio_command = audio_commands.add_parser(name)
+        audio_command.add_argument("job_id")
+        audio_command.add_argument("language")
+        if name == "recover":
+            audio_command.add_argument("request_id")
+            audio_command.add_argument("file", type=Path)
+    preview_visual = sub.add_parser("preview-visual")
+    preview_visual.add_argument("job_id")
+    preview_visual.add_argument("language")
+    preview_visual.add_argument("visual_id")
+
+    feedback = sub.add_parser("add-feedback")
+    feedback.add_argument("job_id")
+    feedback.add_argument("language")
+    feedback.add_argument("file", type=Path)
+    metrics = sub.add_parser("metrics")
+    metrics.add_argument("job_id")
+    metrics.add_argument("language")
 
     listing = sub.add_parser("list")
     listing.add_argument("--status")
@@ -155,6 +215,9 @@ def build_parser() -> argparse.ArgumentParser:
         command = sub.add_parser(name)
         command.add_argument("job_id")
         command.add_argument("language")
+        if name == "preview":
+            command.add_argument("--stage", choices=["concept", "video"], default="video")
+            command.add_argument("--scenes", help="Comma-separated scene IDs for concept preview")
 
     import_render = sub.add_parser("import-render")
     import_render.add_argument("job_id")
@@ -183,6 +246,43 @@ def main(argv: list[str] | None = None) -> int:
                     args.workflow_version,
                 )
             )
+        elif args.command == "checkpoint":
+            print(json.dumps(checkpoints.checkpoint(workspace, args.job_id, args.language), ensure_ascii=False, indent=2))
+        elif args.command == "diff":
+            print(json.dumps(checkpoints.diff(workspace, args.job_id, args.language), ensure_ascii=False, indent=2))
+        elif args.command == "add-visual":
+            print(json.dumps(visuals.add(workspace, args.job_id, args.language, args.file), ensure_ascii=False, indent=2))
+        elif args.command == "add-sound-plan":
+            print(sound.add_plan(workspace, args.job_id, args.language, args.file)["path"])
+        elif args.command in {"sfx", "music"}:
+            print(json.dumps(sound.generate(workspace, args.job_id, args.language, args.command,
+                                           getattr(args, "cue", None), args.new_take), ensure_ascii=False, indent=2))
+        elif args.command == "audio":
+            if args.audio_command == "reindex":
+                print(json.dumps({"indexed": sound.reindex_library(workspace)}))
+            elif args.audio_command == "share":
+                print(json.dumps(sound.share_asset(workspace, args.job_id, args.asset_id, args.purpose), ensure_ascii=False, indent=2))
+            elif args.audio_command == "reuse":
+                print(json.dumps(sound.reuse_asset(workspace, args.job_id, args.entry_id, args.asset_id), ensure_ascii=False, indent=2))
+            elif args.audio_command == "import":
+                print(json.dumps(sound.register_asset(workspace, args.job_id, args.file, args.asset_id,
+                    args.kind, {"description": args.description, "source": args.source,
+                                "usageBasis": args.usage_basis}), ensure_ascii=False, indent=2))
+            elif args.audio_command == "recover":
+                print(json.dumps(sound.recover_request(workspace, args.job_id, args.language,
+                    args.request_id, args.file), ensure_ascii=False, indent=2))
+            elif args.audio_command == "requests":
+                request_dir = workspace.job_dir(args.job_id, args.language) / "audio" / "sound-plan" / "requests"
+                print(json.dumps([json.loads(path.read_text(encoding="utf-8"))
+                                  for path in sorted(request_dir.glob("*.json"))], ensure_ascii=False, indent=2))
+            else:
+                return _audio_preview(workspace, args.job_id, args.language)
+        elif args.command == "preview-visual":
+            print(json.dumps(visuals.preview(workspace, args.job_id, args.language, args.visual_id), ensure_ascii=False, indent=2))
+        elif args.command == "add-feedback":
+            _add_feedback(workspace, args.job_id, args.language, args.file)
+        elif args.command == "metrics":
+            _metrics(workspace, args.job_id, args.language)
         elif args.command == "list":
             _list_jobs(workspace, args.status, args.json)
         elif args.command in {"show", "status"}:
@@ -229,6 +329,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "timeline":
             _timeline(workspace, args.job_id, args.language, args.draft)
         elif args.command in {"studio", "preview", "render"}:
+            if args.command == "preview" and args.stage == "concept":
+                return _concept_preview(workspace, args.job_id, args.language, args.scenes)
+            if args.command == "preview" and args.scenes:
+                raise ValueError("--scenes is only available for --stage concept")
             return _remotion(workspace, args.job_id, args.language, args.command)
         elif args.command == "import-render":
             _import_render(workspace, args.job_id, args.language, args.file)
@@ -278,8 +382,11 @@ def _library(workspace: Workspace, args: argparse.Namespace) -> None:
     elif args.library_command in {"show", "preview"}:
         result = library.show(workspace, args.entry_id)
         if args.library_command == "preview":
+            preview_path = library.preview(workspace, args.entry_id)
             result = {"id": result["id"], "version": result["version"],
-                      "preview": str(library.preview(workspace, args.entry_id)),
+                      "preview": str(preview_path),
+                      "motionPreview": str(preview_path.with_suffix(".mp4")) if result.get("entrypoint")
+                      and isinstance(preview_path, Path) else None,
                       "description": result["description"], "useCases": result["useCases"],
                       "limitations": result["limitations"]}
     elif args.library_command == "add":
@@ -633,8 +740,15 @@ def _timeline(workspace: Workspace, job_id: str, language: str, draft: bool) -> 
         storyboard = read_artifact_json(workspace, storyboard_artifact)
         if job_info.get("workflow_version", 2) >= 3:
             brief = read_artifact_json(workspace, require_artifact(workspace, job_id, language, ArtifactKind.BRIEF))
+            if brief.get("soundDirection") and not workspace.latest_artifact(job_id, ArtifactKind.SOUND_PLAN, language):
+                raise ValueError("Creative brief requests sound design; add a sound plan before compiling")
             if storyboard.get("theme", "dark-grid") != brief["theme"]:
                 raise ValueError("Storyboard theme differs from approved creative brief; revise brief and approval")
+            if job_info.get("workflow_version", 2) >= 4:
+                reference_ids = {item["id"] for item in brief.get("references", [])}
+                for scene in storyboard.get("scenes", []):
+                    if not set(scene.get("referenceIds", [])) <= reference_ids:
+                        raise ValueError(f"Scene {scene.get('id')} uses an unknown reference")
         manifest, _ = load_asset_manifest(workspace, job_id)
         timeline, missing_assets = compile_storyboard(
             transcript,
@@ -644,13 +758,19 @@ def _timeline(workspace: Workspace, job_id: str, language: str, draft: bool) -> 
             language,
             audio_artifact["path"],
             caption_plan,
-            library.entries(workspace) if workspace.get_job(job_id).get("workflow_version", 2) >= 3 else None,
+            ([*library.entries(workspace), *visuals.entries(workspace, job_id, language)]
+             if workspace.get_job(job_id).get("workflow_version", 2) >= 4 else
+             library.entries(workspace) if workspace.get_job(job_id).get("workflow_version", 2) >= 3 else None),
         )
     job = workspace.get_job(job_id)
+    sound.compile_sound(workspace, job_id, language, timeline, transcript["words"])
     if job.get("workflow_version", 2) >= 3:
         timeline["schemaVersion"] = 3
         timeline["rendererCodeSha256"] = sha256_file(workspace.project_root / "renderer" / "src" / "VidkitShort.tsx")
         timeline["rendererPackageLockSha256"] = sha256_file(workspace.project_root / "renderer" / "package-lock.json")
+        if job.get("workflow_version", 2) >= 4:
+            timeline["schemaVersion"] = 4
+            timeline["rendererLock"] = checkpoints.current_renderer_lock(workspace, job_id, language, timeline)
         if "theme" not in timeline:
             brief_artifact = workspace.latest_artifact(job_id, ArtifactKind.BRIEF, language)
             timeline["theme"] = read_artifact_json(workspace, brief_artifact).get("theme", "dark-grid") if brief_artifact else "dark-grid"
@@ -681,6 +801,12 @@ def _timeline(workspace: Workspace, job_id: str, language: str, draft: bool) -> 
         upstream["caption-plan"] = caption_plan_artifact["revision"]
     if manifest_artifact:
         upstream["asset-manifest"] = manifest_artifact["revision"]
+    sound_plan = workspace.latest_artifact(job_id, ArtifactKind.SOUND_PLAN, language)
+    if sound_plan:
+        upstream["sound-plan"] = sound_plan["revision"]
+        sound_assets = workspace.latest_artifact(job_id, ArtifactKind.SOUND_ASSETS, None)
+        if sound_assets:
+            upstream["sound-assets"] = sound_assets["revision"]
     if missing_assets:
         timeline_status = ArtifactStatus.BLOCKED
     elif job["mode"] == Mode.AUTOMATIC.value:
@@ -723,23 +849,40 @@ def _timeline(workspace: Workspace, job_id: str, language: str, draft: bool) -> 
 def _remotion(workspace: Workspace, job_id: str, language: str, action: str) -> int:
     timeline_artifact = require_artifact(workspace, job_id, language, ArtifactKind.TIMELINE)
     timeline = read_artifact_json(workspace, timeline_artifact)
+    if not sound.locks_match(workspace, job_id, language, timeline):
+        raise RuntimeError("Sound plan or audio assets changed; rebuild timeline and preview")
     audio_artifact = require_artifact(workspace, job_id, language, ArtifactKind.AUDIO)
     job = workspace.get_job(job_id)
+    is_v4 = job.get("workflow_version", 2) >= 4
     if job.get("workflow_version", 2) >= 3:
-        if timeline.get("rendererCodeSha256") != sha256_file(workspace.project_root / "renderer" / "src" / "VidkitShort.tsx"):
+        if is_v4:
+            changes = checkpoints.lock_diff(workspace, timeline.get("rendererLock", {}))
+            if changes or timeline.get("rendererLock") != checkpoints.current_renderer_lock(workspace, job_id, language, timeline):
+                raise RuntimeError("Renderer dependencies changed; rebuild timeline: " + ", ".join(changes))
+        elif timeline.get("rendererCodeSha256") != sha256_file(workspace.project_root / "renderer" / "src" / "VidkitShort.tsx"):
             raise RuntimeError("Renderer code changed since timeline compilation; rebuild timeline and preview")
         if timeline.get("rendererPackageLockSha256") != sha256_file(workspace.project_root / "renderer" / "package-lock.json"):
             raise RuntimeError("Renderer dependencies changed since timeline compilation; rebuild timeline and preview")
-        if not library.locks_match(workspace, timeline):
+        if not library.locks_match(workspace, timeline,
+                                   visuals.entries(workspace, job_id, language) if is_v4 else None):
             raise RuntimeError("A locked theme, component or effect changed; rebuild timeline and preview")
         if audio_artifact["sha256"] != sha256_file(workspace.resolve_path(audio_artifact)):
             raise RuntimeError("Audio checksum differs from tracked artifact")
     props = prepare_renderer_job(
         workspace, job_id, language, timeline, workspace.resolve_path(audio_artifact)
     )
+    entrypoint = visuals.render_entry(workspace, job_id, language, timeline) if is_v4 else None
+    checkpoint_revision = None
+    if is_v4:
+        changes = checkpoints.diff(workspace, job_id, language)
+        if changes["checkpoint"] is None or changes["changes"]:
+            checkpoint_revision = checkpoints.checkpoint(workspace, job_id, language,
+                                                         timeline["rendererLock"])["revision"]
+        else:
+            checkpoint_revision = changes["checkpoint"]
     if action == "studio":
         output = workspace.job_root(job_id) / "exports" / f"{slugify(job['topic'])}.{language}.studio.mp4"
-        return run_studio(workspace.project_root, props, output)
+        return run_studio(workspace.project_root, props, output, entrypoint)
     if timeline.get("missingAssets"):
         raise RuntimeError("Cannot export: required assets are missing")
     if timeline_artifact["status"] == ArtifactStatus.BLOCKED.value:
@@ -763,7 +906,7 @@ def _remotion(workspace: Workspace, job_id: str, language: str, action: str) -> 
     if is_v3 and action == "render" and not workspace.latest_artifact(job_id, ArtifactKind.PREVIEW, language):
         raise RuntimeError("Preview MP4 is required before export")
     output = workspace.pending_path(job_id, language, "final.pending.mp4")
-    code = run_render(workspace.project_root, props, output)
+    code = run_render(workspace.project_root, props, output, entrypoint)
     if code == 0:
         kind = ArtifactKind.PREVIEW if action == "preview" else ArtifactKind.RENDER
         upstream = {"timeline": timeline_artifact["revision"]}
@@ -784,13 +927,180 @@ def _remotion(workspace: Workspace, job_id: str, language: str, action: str) -> 
             metadata={"renderer": "remotion", "format": "1080x1920@30",
                       "theme": timeline.get("theme"), "componentLocks": timeline.get("componentLocks", []),
                       "themeLock": timeline.get("themeLock"), "effectLocks": timeline.get("effectLocks", []),
+                      "soundPlanLock": timeline.get("soundPlanLock"),
+                      "soundAssets": [{"id": track["asset"]["id"], "sha256": track["asset"]["sha256"]}
+                                      for track in timeline.get("soundTracks", [])],
                       "rendererCodeSha256": timeline.get("rendererCodeSha256"),
                       "rendererPackageLockSha256": timeline.get("rendererPackageLockSha256"),
+                      "rendererLock": timeline.get("rendererLock"), "checkpointRevision": checkpoint_revision,
                       "claimToScene": timeline.get("claimToScene", {})},
         )
         output.unlink(missing_ok=True)
         print(artifact["path"])
     return code
+
+
+def _audio_preview(workspace: Workspace, job_id: str, language: str) -> int:
+    timeline_artifact = require_artifact(workspace, job_id, language, ArtifactKind.TIMELINE)
+    timeline = read_artifact_json(workspace, timeline_artifact)
+    if not sound.locks_match(workspace, job_id, language, timeline):
+        raise ValueError("Sound plan changed; rebuild timeline")
+    audio = require_artifact(workspace, job_id, language, ArtifactKind.AUDIO)
+    if sha256_file(workspace.resolve_path(audio)) != audio["sha256"]:
+        raise ValueError("Narration checksum mismatch")
+    if timeline.get("rendererLock") and (checkpoints.lock_diff(workspace, timeline["rendererLock"])
+            or timeline["rendererLock"] != checkpoints.current_renderer_lock(workspace, job_id, language, timeline)):
+        raise ValueError("Renderer changed; rebuild timeline")
+    props = prepare_renderer_job(workspace, job_id, language, timeline, workspace.resolve_path(audio))
+    entry = visuals.render_entry(workspace, job_id, language, timeline) if timeline.get("schemaVersion", 2) >= 4 else Path("src/index.ts")
+    output = workspace.pending_path(job_id, language, "mix.pending.wav")
+    code = subprocess.run([*remotion_command(workspace.project_root), "render", str(entry), "VidkitShort",
+                           str(output), "--props", str(props), "--codec", "wav"],
+                          cwd=workspace.project_root / "renderer", check=False).returncode
+    if code == 0:
+        info = sound.inspect_audio(output)
+        artifact = workspace.add_file_artifact(job_id, language, ArtifactKind.AUDIO_MIX, output, ArtifactStatus.NEEDS_REVIEW,
+            upstream={"timeline": timeline_artifact["revision"]}, metadata={**info, "soundPlanLock": timeline.get("soundPlanLock"),
+            "audioListening": "not-run"})
+        output.unlink(missing_ok=True)
+        print(artifact["path"])
+    return code
+
+
+def _concept_preview(workspace: Workspace, job_id: str, language: str, selection: str | None) -> int:
+    job = workspace.get_job(job_id)
+    if job.get("workflow_version", 2) < 4:
+        raise ValueError("Concept preview requires workflow v4")
+    brief_artifact = require_artifact(workspace, job_id, language, ArtifactKind.BRIEF)
+    brief = read_artifact_json(workspace, brief_artifact)
+    source_scenes = brief["conceptPreview"]["scenes"]
+    selected = set(selection.split(",")) if selection else {
+        scene["id"] for scene in source_scenes if scene["role"] in {"hook", "evidence"}
+    }
+    if not selected or selected - {scene["id"] for scene in source_scenes}:
+        raise ValueError("--scenes contains an unknown concept scene")
+    import copy
+    audio_artifact = workspace.latest_artifact(job_id, ArtifactKind.AUDIO, language)
+    audio_path = workspace.resolve_path(audio_artifact) if audio_artifact else None
+    if audio_path and sha256_file(audio_path) != audio_artifact["sha256"]:
+        raise ValueError("Audio checksum mismatch")
+    audio_ms = (audio_duration(audio_path) or 0) * 1000 if audio_path else 0
+    scenes = []
+    audio_segments = []
+    cursor = 0
+    for original in source_scenes:
+        if original["id"] not in selected:
+            continue
+        scene = copy.deepcopy(original)
+        scene["componentId"] = scene.get("componentId", scene.get("component"))
+        duration = scene["endMs"] - scene["startMs"]
+        source_start = scene.get("audioStartMs", scene["startMs"])
+        if audio_path and 0 <= source_start and source_start + duration <= audio_ms:
+            audio_segments.append({"startMs": cursor, "endMs": cursor + duration,
+                                   "sourceStartMs": source_start})
+        elif audio_path and "audioStartMs" in scene:
+            raise ValueError(f"Concept audio range exceeds narration: {scene['id']}")
+        scene["startMs"] = cursor
+        scene["endMs"] = cursor + duration
+        cursor += duration
+        scenes.append(scene)
+    props_data = {"schemaVersion": 4, "language": language, "title": job["topic"],
+                  "audioSrc": "", "theme": brief["theme"], "durationSeconds": cursor / 1000,
+                  "captions": [], "scenes": scenes}
+    props_data["audioSegments"] = audio_segments
+    theme_entry = library.show(workspace, brief["theme"])
+    props_data["themeData"] = theme_entry["style"]
+    props = prepare_renderer_job(workspace, job_id, language, props_data, audio_path if audio_segments else None)
+    entry = visuals.render_entry(workspace, job_id, language, props_data)
+    output_dir = workspace.job_dir(job_id, language) / "briefs" / "concept"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"concept.r{brief_artifact['revision']}.mp4"
+    code = run_render(workspace.project_root, props, output, entry)
+    if code:
+        return code
+    complete_scenes = copy.deepcopy(source_scenes)
+    for scene in complete_scenes:
+        scene["componentId"] = scene.get("componentId", scene.get("component"))
+    complete = {**props_data, "scenes": complete_scenes,
+                "durationSeconds": max(scene["endMs"] for scene in source_scenes) / 1000}
+    complete_props = prepare_renderer_job(workspace, job_id, language, complete, None)
+    complete_entry = visuals.render_entry(workspace, job_id, language, complete)
+    frames = {}
+    for role in ("hook", "evidence", "takeaway"):
+        scene = next(item for item in source_scenes if item["role"] == role)
+        frame = max(0, round((scene["startMs"] + scene["endMs"]) / 2000 * 30))
+        target = output_dir / f"{role}.r{brief_artifact['revision']}.png"
+        still = [*remotion_command(workspace.project_root), "still", str(complete_entry),
+                 "VidkitShort", str(target), "--props", str(complete_props), "--frame", str(frame),
+                 "--overwrite"]
+        code = subprocess.run(still, cwd=workspace.project_root / "renderer", check=False).returncode
+        if code:
+            return code
+        frames[role] = target.relative_to(workspace.workspace_root).as_posix()
+    metadata = {"briefRevision": brief_artifact["revision"], "briefSha256": brief_artifact["sha256"],
+                "selectedScenes": [scene["id"] for scene in scenes], "provisionalTiming": True,
+                "preview": output.relative_to(workspace.workspace_root).as_posix(),
+                "sha256": sha256_file(output), "frames": frames}
+    metadata["audioReuse"] = {"revision": audio_artifact["revision"] if audio_segments else None,
+                              "sha256": audio_artifact["sha256"] if audio_segments else None,
+                              "segments": audio_segments,
+                              "silentSceneIds": [scene["id"] for scene in scenes
+                                  if not any(segment["startMs"] == scene["startMs"] for segment in audio_segments)]}
+    metadata["rendererLock"] = checkpoints.current_renderer_lock(workspace, job_id, language, complete)
+    metadata["themeLock"] = {"id": theme_entry["id"], "version": theme_entry["version"],
+                             "sha256": theme_entry["sha256"]}
+    (output_dir / f"concept.r{brief_artifact['revision']}.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(output)
+    return 0
+
+
+def _add_feedback(workspace: Workspace, job_id: str, language: str, source: Path) -> None:
+    from datetime import UTC, datetime
+    data = load_json(source)
+    timeline = require_artifact(workspace, job_id, language, ArtifactKind.TIMELINE)
+    preview = workspace.latest_artifact(job_id, ArtifactKind.PREVIEW, language)
+    scene_ids = {scene["id"] for scene in read_artifact_json(workspace, timeline).get("scenes", [])}
+    observations = data.get("observations")
+    if not isinstance(observations, list) or not observations:
+        raise ValueError("Feedback needs observations")
+    for item in observations:
+        if item.get("sceneId") not in scene_ids or item.get("scope") not in {"video", "general-proposal"}:
+            raise ValueError("Feedback needs valid sceneId and video/general-proposal scope")
+        if item.get("category") not in {"layout", "explanation", "timing", "visual", "caption", "transition"}:
+            raise ValueError("Feedback category is invalid")
+        if not item.get("observation"):
+            raise ValueError("Feedback observation is required")
+    minutes = data.get("reviewMinutes")
+    if minutes is not None and (not isinstance(minutes, (int, float)) or minutes < 0):
+        raise ValueError("reviewMinutes must be nonnegative")
+    root = workspace.job_dir(job_id, language) / "feedback"
+    root.mkdir(parents=True, exist_ok=True)
+    revision = len(list(root.glob("feedback.r*.json"))) + 1
+    record = {"timelineRevision": timeline["revision"], "timelineSha256": timeline["sha256"],
+              "previewRevision": preview["revision"] if preview else None,
+              "createdAt": datetime.now(UTC).isoformat(), "observations": observations,
+              "reviewMinutes": minutes}
+    output = root / f"feedback.r{revision}.json"
+    output.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(output)
+
+
+def _metrics(workspace: Workspace, job_id: str, language: str) -> None:
+    workspace.get_job(job_id)
+    root = workspace.job_dir(job_id, language) / "feedback"
+    feedback = [json.loads(path.read_text(encoding="utf-8")) for path in root.glob("feedback.r*.json")]
+    revisions = workspace.list_artifacts(job_id)
+    previews = [item for item in revisions if item["kind"] == ArtifactKind.PREVIEW.value
+                and item["language"] == language]
+    observations = [item for record in feedback for item in record["observations"]]
+    report = {"jobId": job_id, "language": language, "previewRounds": len(previews),
+              "manualRevisionRequests": len([item for item in observations if item["scope"] == "video"]),
+              "reviewMinutesRecorded": sum(record.get("reviewMinutes") or 0 for record in feedback),
+              "reviewsWithoutTime": sum(record.get("reviewMinutes") is None for record in feedback),
+              "revisionRequestsByCategory": {category: sum(item["category"] == category for item in observations)
+                                              for category in ("layout", "explanation", "timing", "visual", "caption", "transition")}}
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 def _import_render(workspace: Workspace, job_id: str, language: str, file: Path) -> None:

@@ -26,40 +26,94 @@ def current_approval(workspace: Workspace, job_id: str, language: str, stage: st
             continue
         record = payload(workspace, artifact)
         if record.get("stage") == stage:
-            return record.get("targets") == {kind: {"revision": item["revision"], "sha256": item["sha256"]}
-                                               for kind, item in current.items()}
+            matching = record.get("targets") == {kind: {"revision": item["revision"], "sha256": item["sha256"]}
+                                                       for kind, item in current.items()}
+            if not matching:
+                return False
+            if stage == "concept" and workspace.get_job(job_id).get("workflow_version", 2) >= 4:
+                brief = current[K.BRIEF.value]
+                evidence_path = workspace.job_dir(job_id, language) / "briefs" / "concept" / f"concept.r{brief['revision']}.json"
+                if not evidence_path.is_file():
+                    return False
+                evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                preview_path = workspace.resolve_path(evidence["preview"])
+                if not preview_path.is_file() or sha256_file(preview_path) != evidence.get("sha256"):
+                    return False
+                from .library import locks_match
+                return (record.get("conceptPreviewSha256") == evidence.get("sha256")
+                        and locks_match(workspace, {"themeLock": evidence.get("themeLock")}))
+            return True
     return False
 
 
 def add_brief(workspace: Workspace, job_id: str, language: str, source: Path) -> dict[str, Any]:
     data = json.loads(source.read_text(encoding="utf-8"))
+    is_v4 = workspace.get_job(job_id).get("workflow_version", 2) >= 4
     script = workspace.latest_artifact(job_id, K.SCRIPT, language)
     if not script:
         raise ValueError("Add a script before the creative brief")
-    required = {"angle", "theme", "hook", "visualStrategy", "frames"}
+    required = {"angle", "theme", "hook", "visualStrategy"}
+    if data.get("soundDirection") is not None and not isinstance(data["soundDirection"], dict):
+        raise ValueError("soundDirection must be a creative-direction object")
+    if not is_v4:
+        required.add("frames")
     if required - data.keys():
         raise ValueError(f"Brief missing: {', '.join(sorted(required - data.keys()))}")
     from .library import entries
     if not any(item["kind"] == "theme" and item["id"] == data["theme"] for item in entries(workspace)):
         raise ValueError(f"Unknown theme: {data['theme']}")
-    frames = data["frames"]
-    if not isinstance(frames, dict) or not {"hook", "evidence", "takeaway"} <= frames.keys():
-        raise ValueError("Brief needs hook, evidence, and takeaway frame descriptions")
-    for name in ("hook", "evidence", "takeaway"):
-        frame = frames[name]
-        if not isinstance(frame, dict) or not isinstance(frame.get("headline"), str) or not frame["headline"].strip():
-            raise ValueError(f"Brief {name} frame needs a headline")
-        if not frame.get("imagePath") and not str(frame.get("visualNote", "")).strip():
-            raise ValueError(f"Brief {name} frame needs imagePath or visualNote")
+    frames = data.get("frames")
+    if not is_v4:
+        if not isinstance(frames, dict) or not {"hook", "evidence", "takeaway"} <= frames.keys():
+            raise ValueError("Brief needs hook, evidence, and takeaway frame descriptions")
+        for name in ("hook", "evidence", "takeaway"):
+            frame = frames[name]
+            if not isinstance(frame, dict) or not isinstance(frame.get("headline"), str) or not frame["headline"].strip():
+                raise ValueError(f"Brief {name} frame needs a headline")
+            if not frame.get("imagePath") and not str(frame.get("visualNote", "")).strip():
+                raise ValueError(f"Brief {name} frame needs imagePath or visualNote")
     if data.get("screenshotUnavailable"):
         alternative = data.get("screenshotAlternative")
         if not isinstance(alternative, dict) or alternative.get("type") not in {
             "official-artwork", "api-example", "chart", "diagram", "recreated-illustration"
         } or not alternative.get("sourceUrl"):
             raise ValueError("Document alternative type and sourceUrl when a screenshot is unavailable")
+    if is_v4:
+        concept = data.get("conceptPreview")
+        if not isinstance(concept, dict) or not isinstance(concept.get("scenes"), list):
+            raise ValueError("v4 brief needs conceptPreview scenes for early motion review")
+        roles = {scene.get("role") for scene in concept["scenes"] if isinstance(scene, dict)}
+        if not {"hook", "evidence", "takeaway"} <= roles:
+            raise ValueError("Concept preview needs hook, evidence and takeaway roles")
+        for scene in concept["scenes"]:
+            if not scene.get("component") or not scene.get("id") or scene.get("endMs", 0) <= scene.get("startMs", 0):
+                raise ValueError("Concept scene needs id, component and provisional timing")
+        if not isinstance(data.get("beats"), list) or not data["beats"]:
+            raise ValueError("v4 brief needs narrative beats")
+        for beat in data["beats"]:
+            development = beat.get("development", {})
+            if not all(development.get(key) for key in ("understanding", "object", "action", "result", "connection")):
+                raise ValueError("Each beat needs understanding, object, action, result and connection")
+            if beat.get("approach") not in {"reuse", "compose", "custom"}:
+                raise ValueError("Each beat needs reuse, compose or custom approach")
+        alternatives = data.get("explanationAlternatives", [])
+        if len(alternatives) != 2 or not data.get("chosenExplanation"):
+            raise ValueError("v4 brief needs two explanation alternatives and a choice")
+        beat_ids = {beat.get("id") for beat in data["beats"]}
+        if None in beat_ids or len(beat_ids) != len(data["beats"]):
+            raise ValueError("Narrative beats need unique ids")
+        references = data.get("references", [])
+        if not isinstance(references, list):
+            raise ValueError("references must be a list")
+        for reference in references:
+            if not reference.get("id") or not reference.get("sourceUrl") or not reference.get("observation"):
+                raise ValueError("Reference needs id, sourceUrl and observed construction")
+            if not set(reference.get("beatIds", [])) <= beat_ids:
+                raise ValueError("Reference points to an unknown beat")
     previous = workspace.latest_artifact(job_id, K.BRIEF, language, include_invalidated=True)
     revision = previous["revision"] + 1 if previous else 1
-    data["framePreviews"] = render_brief_frames(workspace, job_id, language, frames, data["theme"], revision)
+    if not is_v4:
+        data["framePreviews"] = render_brief_frames(workspace, job_id, language, frames, data["theme"], revision)
     workspace.invalidate_downstream(job_id, language, K.BRIEF)
     return workspace.add_json_artifact(job_id, language, K.BRIEF, data, S.CHECKED,
                                        upstream={"script": script["revision"]})
@@ -87,17 +141,37 @@ def approve(workspace: Workspace, job_id: str, language: str, stage: str, review
         if not item:
             raise ValueError(f"Missing {kind.value} for {stage} approval")
         targets[kind.value] = {"revision": item["revision"], "sha256": item["sha256"]}
+    if stage == "concept" and workspace.get_job(job_id).get("workflow_version", 2) >= 4:
+        brief = workspace.latest_artifact(job_id, K.BRIEF, language)
+        record = workspace.job_dir(job_id, language) / "briefs" / "concept" / f"concept.r{brief['revision']}.json"
+        if not record.is_file():
+            raise ValueError("Render concept motion preview before approval")
+        evidence = json.loads(record.read_text(encoding="utf-8"))
+        if evidence.get("briefSha256") != brief["sha256"] or not workspace.resolve_path(evidence["preview"]).is_file():
+            raise ValueError("Concept preview is stale; render it again")
+        if sha256_file(workspace.resolve_path(evidence["preview"])) != evidence.get("sha256"):
+            raise ValueError("Concept preview checksum changed; render it again")
+        from .checkpoints import current_renderer_lock, lock_diff
+        from .library import locks_match
+        concept = payload(workspace, brief).get("conceptPreview", {})
+        if (lock_diff(workspace, evidence.get("rendererLock", {}))
+                or evidence.get("rendererLock") != current_renderer_lock(workspace, job_id, language, concept)
+                or not locks_match(workspace, {"themeLock": evidence.get("themeLock")})):
+            raise ValueError("Concept renderer changed; render concept preview again")
     if stage == "export":
         report = payload(workspace, workspace.latest_artifact(job_id, K.QA_REPORT, language))
         if any(check["status"] == "fail" for check in report["checks"].values()):
             raise ValueError("QA failed; cannot approve export")
     record = {"stage": stage, "reviewer": reviewer.strip(), "approvedAt": datetime.now(UTC).isoformat(),
               "targets": targets}
+    if stage == "concept" and workspace.get_job(job_id).get("workflow_version", 2) >= 4:
+        record["conceptPreviewSha256"] = evidence["sha256"]
     return workspace.add_json_artifact(job_id, language, K.APPROVAL, record, S.APPROVED,
                                        metadata={"stage": stage})
 
 
-QA_SECTIONS = ("automatic", "mediaProbe", "frameInspection", "transitionReview", "fullPlayback", "audioListening")
+QA_SECTIONS = ("automatic", "mediaProbe", "frameInspection", "transitionReview", "fullPlayback", "audioListening",
+               "visualClarity", "continuity", "pacing", "claimMatch", "layoutOverflow", "soundDesign")
 
 
 def make_qa(workspace: Workspace, job_id: str, language: str, supplied: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -110,9 +184,29 @@ def make_qa(workspace: Workspace, job_id: str, language: str, supplied: dict[str
     issues.extend(f"Missing asset: {item}" for item in data.get("missingAssets", []))
     if not workspace.resolve_path(preview).is_file():
         issues.append("Preview file missing")
+    from . import sound
+    if not sound.locks_match(workspace, job_id, language, data):
+        issues.append("Sound assets or plan changed after compilation")
+    for scene in data.get("scenes", []):
+        props = scene.get("componentProps", {})
+        if scene.get("componentId") == "range-log-chart" and (not props.get("unit") or not props.get("source")):
+            issues.append(f"Scene {scene['id']}: chart needs unit and source")
+        focus = scene.get("focusRect")
+        captions = [cue for cue in data.get("captions", [])
+                    if cue.get("startMs", 0) < scene.get("endMs", 0)
+                    and cue.get("endMs", 0) > scene.get("startMs", 0)]
+        if isinstance(focus, dict) and captions:
+            caption_box = {"x": .15, "y": .78, "width": .70, "height": .17}
+            intersects = (focus.get("x", 0) < caption_box["x"] + caption_box["width"]
+                          and focus.get("x", 0) + focus.get("width", 0) > caption_box["x"]
+                          and focus.get("y", 0) < caption_box["y"] + caption_box["height"]
+                          and focus.get("y", 0) + focus.get("height", 0) > caption_box["y"])
+            if intersects:
+                issues.append(f"Scene {scene['id']}: caption overlaps declared focus region")
     checks = {"automatic": {"status": "fail" if issues else "pass", "evidence": issues or
                             [f"Preview {preview['path']} exists", "Timeline validation passed"]}}
-    ffprobe = shutil.which("ffprobe")
+    bundled_ffprobe = workspace.project_root / "renderer" / "node_modules" / "@remotion" / "compositor-win32-x64-msvc" / "ffprobe.exe"
+    ffprobe = shutil.which("ffprobe") or (str(bundled_ffprobe) if bundled_ffprobe.is_file() else None)
     if ffprobe:
         try:
             probe = subprocess.run([ffprobe, "-v", "error", "-show_streams", "-of", "json",
@@ -137,11 +231,13 @@ def make_qa(workspace: Workspace, job_id: str, language: str, supplied: dict[str
         if check["status"] == "pass" and not check["evidence"]:
             raise ValueError(f"QA pass requires evidence: {name}")
         checks[name] = check
+    if data.get("soundPlanLock"):
+        checks["audioLevels"] = sound.audio_level_check(workspace, workspace.resolve_path(preview))
     brief = workspace.latest_artifact(job_id, K.BRIEF, language)
     limitations = []
     if brief and payload(workspace, brief).get("screenshotUnavailable"):
         limitations.append("Product screenshot unavailable; sourced alternative used")
-    layouts = [scene.get("layout") for scene in data.get("scenes", [])]
+    layouts = [(scene.get("layout"), scene.get("motion", {}).get("mode")) for scene in data.get("scenes", [])]
     if any(layouts[index] == layouts[index + 1] == layouts[index + 2] for index in range(len(layouts) - 2)):
         limitations.append("Three consecutive scenes repeat the same layout")
     if any(scene.get("layout") in {"screenshot", "screenshot-focus"} and
@@ -149,6 +245,12 @@ def make_qa(workspace: Workspace, job_id: str, language: str, supplied: dict[str
            scene.get("asset", {}).get("width", 0) > scene.get("asset", {}).get("height", 0) * 1.4
            for scene in data.get("scenes", []) if scene.get("asset")):
         limitations.append("Wide visual may be too small on a portrait screen; inspect a phone-sized frame")
+    for scene in data.get("scenes", []):
+        duration = (scene.get("endMs", 0) - scene.get("startMs", 0)) / 1000
+        if duration >= 5 and not scene.get("events") and not scene.get("motion", {}).get("cues"):
+            limitations.append(f"Scene {scene['id']}: {duration:.1f}s without declared motion; inspect pacing")
+        if len(scene.get("title", "") + " " + scene.get("body", "")) > 190:
+            limitations.append(f"Scene {scene['id']}: dense on-screen text; inspect at phone size")
     report = {"schemaVersion": 3, "checks": checks, "limitations": limitations,
               "preview": {"revision": preview["revision"], "sha256": preview["sha256"]},
               "timeline": {"revision": timeline["revision"], "sha256": timeline["sha256"]}}
@@ -171,6 +273,22 @@ def next_state(workspace: Workspace, job: dict[str, Any], language: str) -> dict
     if source and source["status"] != S.CHECKED.value:
         return {"jobId": job_id, "language": language, "step": "source-review",
                 "command": f"vidkit show {job_id}", "issues": [f"Source status: {source['status']}"]}
+    if job.get("workflow_version", 2) >= 4 and not current_approval(workspace, job_id, language, "concept"):
+        brief = workspace.latest_artifact(job_id, K.BRIEF, language)
+        record = workspace.job_dir(job_id, language) / "briefs" / "concept" / f"concept.r{brief['revision']}.json"
+        if not record.is_file():
+            return {"jobId": job_id, "language": language, "step": "concept-preview",
+                    "command": f"vidkit preview {job_id} {language} --stage concept", "issues": []}
+        evidence = json.loads(record.read_text(encoding="utf-8"))
+        from .checkpoints import current_renderer_lock, lock_diff
+        from .library import locks_match
+        if (evidence.get("briefSha256") != brief["sha256"] or not workspace.resolve_path(evidence["preview"]).is_file()
+                or lock_diff(workspace, evidence.get("rendererLock", {}))
+                or evidence.get("rendererLock") != current_renderer_lock(
+                    workspace, job_id, language, payload(workspace, brief).get("conceptPreview", {}))
+                or not locks_match(workspace, {"themeLock": evidence.get("themeLock")})):
+            return {"jobId": job_id, "language": language, "step": "concept-preview-stale",
+                    "command": f"vidkit preview {job_id} {language} --stage concept", "issues": ["Concept preview changed"]}
     if job["mode"] == "review" and not current_approval(workspace, job_id, language, "concept"):
         return {"jobId": job_id, "language": language, "step": "await-concept-approval",
                 "command": f"vidkit approve {job_id} {language} concept --reviewer <name>", "issues": []}
@@ -190,6 +308,23 @@ def next_state(workspace: Workspace, job: dict[str, Any], language: str) -> dict
                 return {"jobId": job_id, "language": language, "step": "transcript-review",
                         "command": f"vidkit show {job_id}",
                         "issues": [f"Normalized transcript status: {transcript['status']}"]}
+        if kind == K.TIMELINE:
+            from . import sound
+            brief_data = payload(workspace, workspace.latest_artifact(job_id, K.BRIEF, language))
+            if brief_data.get("soundDirection") and not workspace.latest_artifact(job_id, K.SOUND_PLAN, language):
+                return {"jobId": job_id, "language": language, "step": "sound-plan",
+                        "command": f"vidkit add-sound-plan {job_id} {language} <sound-plan.json>", "issues": []}
+            missing = sound.pending_sounds(workspace, job_id, language)
+            if missing:
+                plan = sound.get_plan(workspace, job_id, language)
+                music = plan.get("music")
+                if music and music.get("assetId", music["id"]) == missing[0] and music.get("prompt"):
+                    command = f"vidkit music generate {job_id} {language}"
+                else:
+                    cue = next((c for c in plan.get("sfx", []) if c.get("assetId", c["id"]) == missing[0]), None)
+                    command = f"vidkit sfx generate {job_id} {language} --cue {cue['id']}" if cue and cue.get("prompt") else f"vidkit show {job_id}"
+                return {"jobId": job_id, "language": language, "step": "sound-assets",
+                        "command": command, "issues": ["Generate or import sound: " + item for item in missing]}
         if not workspace.latest_artifact(job_id, kind, language):
             return {"jobId": job_id, "language": language, "step": step, "command": command, "issues": []}
         if kind == K.TIMELINE:
@@ -198,9 +333,17 @@ def next_state(workspace: Workspace, job: dict[str, Any], language: str) -> dict
             renderer_hash = sha256_file(workspace.project_root / "renderer" / "src" / "VidkitShort.tsx")
             package_hash = sha256_file(workspace.project_root / "renderer" / "package-lock.json")
             from .library import locks_match
-            if (timeline_data.get("rendererCodeSha256") != renderer_hash or
-                    timeline_data.get("rendererPackageLockSha256") != package_hash or
-                    not locks_match(workspace, timeline_data)):
+            from . import visuals
+            from .checkpoints import current_renderer_lock, lock_diff
+            is_v4 = job.get("workflow_version", 2) >= 4
+            code_changed = (bool(lock_diff(workspace, timeline_data.get("rendererLock", {})))
+                            or timeline_data.get("rendererLock") != current_renderer_lock(
+                                workspace, job_id, language, timeline_data)) if is_v4 else (
+                                timeline_data.get("rendererCodeSha256") != renderer_hash)
+            if (code_changed or timeline_data.get("rendererPackageLockSha256") != package_hash
+                    or not sound.locks_match(workspace, job_id, language, timeline_data)
+                    or not locks_match(workspace, timeline_data,
+                                       visuals.entries(workspace, job_id, language) if is_v4 else None)):
                 return {"jobId": job_id, "language": language, "step": "timeline-stale",
                         "command": f"vidkit timeline {job_id} {language}",
                         "issues": ["Renderer or a locked library entry changed since timeline compilation"]}
