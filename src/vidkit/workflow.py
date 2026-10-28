@@ -10,6 +10,7 @@ from typing import Any
 from .models import ArtifactKind as K, ArtifactStatus as S
 from .storage import Workspace, sha256_file
 from .brief_frames import render_brief_frames
+from . import backgrounds
 
 
 def payload(workspace: Workspace, artifact: dict[str, Any]) -> dict[str, Any]:
@@ -32,7 +33,7 @@ def current_approval(workspace: Workspace, job_id: str, language: str, stage: st
                 return False
             if stage == "concept" and workspace.get_job(job_id).get("workflow_version", 2) >= 4:
                 brief = current[K.BRIEF.value]
-                evidence_path = workspace.job_dir(job_id, language) / "briefs" / "concept" / f"concept.r{brief['revision']}.json"
+                evidence_path = workspace.area(job_id, language, "briefs") / "concept" / f"concept.r{brief['revision']}.json"
                 if not evidence_path.is_file():
                     return False
                 evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
@@ -41,7 +42,8 @@ def current_approval(workspace: Workspace, job_id: str, language: str, stage: st
                     return False
                 from .library import locks_match
                 return (record.get("conceptPreviewSha256") == evidence.get("sha256")
-                        and locks_match(workspace, {"themeLock": evidence.get("themeLock")}))
+                        and backgrounds.evidence_matches(evidence, payload(workspace, brief), workspace.get_job(job_id).get("workflow_version", 2))
+                        and locks_match(workspace, backgrounds.lock_fields(evidence)))
             return True
     return False
 
@@ -60,8 +62,18 @@ def add_brief(workspace: Workspace, job_id: str, language: str, source: Path) ->
     if required - data.keys():
         raise ValueError(f"Brief missing: {', '.join(sorted(required - data.keys()))}")
     from .library import entries
-    if not any(item["kind"] == "theme" and item["id"] == data["theme"] for item in entries(workspace)):
+    available = entries(workspace)
+    if not any(item["kind"] == "theme" and item["id"] == data["theme"] for item in available):
         raise ValueError(f"Unknown theme: {data['theme']}")
+    if workspace.get_job(job_id).get("workflow_version", 2) >= 10 or data.get("background") is not None:
+        data["background"] = backgrounds.resolve(data.get("background"), available, require_motion=False)["background"]
+    elif workspace.get_job(job_id).get("workflow_version", 2) >= 7:
+        background = next((item for item in reversed(available) if item.get("kind") == "background"
+                           and item["id"] == data.get("backgroundId")), None)
+        if not background:
+            raise ValueError("v7 creative brief needs a backgroundId from the library")
+        if background.get("status") == "candidate" and not background.get("previewValid"):
+            raise ValueError("Candidate background needs a rendered motion preview")
     frames = data.get("frames")
     if not is_v4:
         if not isinstance(frames, dict) or not {"hook", "evidence", "takeaway"} <= frames.keys():
@@ -85,6 +97,28 @@ def add_brief(workspace: Workspace, job_id: str, language: str, source: Path) ->
         roles = {scene.get("role") for scene in concept["scenes"] if isinstance(scene, dict)}
         if not {"hook", "evidence", "takeaway"} <= roles:
             raise ValueError("Concept preview needs hook, evidence and takeaway roles")
+        if workspace.get_job(job_id).get("workflow_version", 2) >= 5:
+            cta_scenes = [scene for scene in concept["scenes"] if isinstance(scene, dict) and scene.get("role") == "cta"]
+            if len(cta_scenes) != 1 or concept["scenes"][-1] is not cta_scenes[0]:
+                raise ValueError("v5 concept preview needs one final CTA scene")
+            cta = payload(workspace, script).get("cta", {})
+            if workspace.get_job(job_id).get("workflow_version", 2) >= 9:
+                if (cta_scenes[0].get("component") != "channel-cta-strip"
+                        or cta_scenes[0].get("endMs", 0) - cta_scenes[0].get("startMs", 0) < 5000):
+                    raise ValueError("v9 concept CTA needs channel-cta-strip and at least 5 seconds")
+                if not str(cta_scenes[0].get("title", "")).strip():
+                    raise ValueError("v9 concept CTA needs a topic-specific title")
+            elif workspace.get_job(job_id).get("workflow_version", 2) >= 8:
+                if (cta_scenes[0].get("component") != "channel-cta"
+                        or cta_scenes[0].get("endMs", 0) - cta_scenes[0].get("startMs", 0) < 4000):
+                    raise ValueError("v8 concept CTA needs channel-cta and at least 4 seconds")
+                if not str(cta_scenes[0].get("title", "")).strip():
+                    raise ValueError("v8 concept CTA needs a topic-specific title")
+            else:
+                if not cta.get("commentQuestion") or not str(cta["commentQuestion"]).strip():
+                    raise ValueError("v5 script needs a comment question before concept preview")
+                if not str(cta_scenes[0].get("title", "")).strip() or not str(cta_scenes[0].get("body", "")).strip():
+                    raise ValueError("v5 concept CTA needs a question title and follow invitation")
         for scene in concept["scenes"]:
             if not scene.get("component") or not scene.get("id") or scene.get("endMs", 0) <= scene.get("startMs", 0):
                 raise ValueError("Concept scene needs id, component and provisional timing")
@@ -143,7 +177,7 @@ def approve(workspace: Workspace, job_id: str, language: str, stage: str, review
         targets[kind.value] = {"revision": item["revision"], "sha256": item["sha256"]}
     if stage == "concept" and workspace.get_job(job_id).get("workflow_version", 2) >= 4:
         brief = workspace.latest_artifact(job_id, K.BRIEF, language)
-        record = workspace.job_dir(job_id, language) / "briefs" / "concept" / f"concept.r{brief['revision']}.json"
+        record = workspace.area(job_id, language, "briefs") / "concept" / f"concept.r{brief['revision']}.json"
         if not record.is_file():
             raise ValueError("Render concept motion preview before approval")
         evidence = json.loads(record.read_text(encoding="utf-8"))
@@ -153,10 +187,12 @@ def approve(workspace: Workspace, job_id: str, language: str, stage: str, review
             raise ValueError("Concept preview checksum changed; render it again")
         from .checkpoints import current_renderer_lock, lock_diff
         from .library import locks_match
-        concept = payload(workspace, brief).get("conceptPreview", {})
+        brief_data = payload(workspace, brief)
+        concept = {**brief_data.get("conceptPreview", {}), **backgrounds.selection_fields(brief_data)}
         if (lock_diff(workspace, evidence.get("rendererLock", {}))
                 or evidence.get("rendererLock") != current_renderer_lock(workspace, job_id, language, concept)
-                or not locks_match(workspace, {"themeLock": evidence.get("themeLock")})):
+                or not backgrounds.evidence_matches(evidence, brief_data, workspace.get_job(job_id).get("workflow_version", 2))
+                or not locks_match(workspace, backgrounds.lock_fields(evidence))):
             raise ValueError("Concept renderer changed; render concept preview again")
     if stage == "export":
         report = payload(workspace, workspace.latest_artifact(job_id, K.QA_REPORT, language))
@@ -180,13 +216,27 @@ def make_qa(workspace: Workspace, job_id: str, language: str, supplied: dict[str
     if not timeline or not preview:
         raise ValueError("Timeline and preview MP4 required before QA")
     data = payload(workspace, timeline)
+    center_visuals = workspace.get_job(job_id).get("workflow_version", 2) >= 6
     issues = list(data.get("validationIssues", []))
     issues.extend(f"Missing asset: {item}" for item in data.get("missingAssets", []))
+    if workspace.get_job(job_id).get("workflow_version", 2) >= 5:
+        scenes = data.get("scenes", [])
+        if not scenes or scenes[-1].get("role") != "cta":
+            issues.append("v5 preview has no final CTA scene")
+    if center_visuals:
+        for scene in data.get("scenes", []):
+            if scene.get("visualAlignment") != "centered":
+                issues.append(f"Scene {scene.get('id')}: v6 visual alignment contract missing")
     if not workspace.resolve_path(preview).is_file():
         issues.append("Preview file missing")
     from . import sound
     if not sound.locks_match(workspace, job_id, language, data):
         issues.append("Sound assets or plan changed after compilation")
+    if workspace.get_job(job_id).get("workflow_version", 2) >= 7:
+        from .library import locks_match
+        from . import visuals
+        if not locks_match(workspace, data, visuals.entries(workspace, job_id, language)):
+            issues.append("Background or another library entry changed after compilation")
     for scene in data.get("scenes", []):
         props = scene.get("componentProps", {})
         if scene.get("componentId") == "range-log-chart" and (not props.get("unit") or not props.get("source")):
@@ -224,12 +274,28 @@ def make_qa(workspace: Workspace, job_id: str, language: str, supplied: dict[str
             checks["mediaProbe"] = {"status": "fail", "evidence": ["ffprobe could not inspect preview MP4"]}
     else:
         checks["mediaProbe"] = {"status": "not-run", "evidence": ["ffprobe unavailable"]}
-    for name in QA_SECTIONS[2:]:
+    qa_sections = (*QA_SECTIONS[2:], "visualAlignment") if (center_visuals or (supplied or {}).get("checks", {}).get("visualAlignment")) else QA_SECTIONS[2:]
+    if workspace.get_job(job_id).get("workflow_version", 2) >= 7 or data.get("background") is not None:
+        qa_sections = (*qa_sections, "backgroundMotion")
+    for name in qa_sections:
         check = (supplied or {}).get("checks", {}).get(name, {"status": "not-run", "evidence": []})
         if check.get("status") not in {"pass", "fail", "not-run"} or not isinstance(check.get("evidence"), list):
             raise ValueError(f"Invalid QA check: {name}")
         if check["status"] == "pass" and not check["evidence"]:
             raise ValueError(f"QA pass requires evidence: {name}")
+        if name == "visualAlignment" and check["status"] == "fail":
+            scene_by_id = {scene.get("id"): scene for scene in data.get("scenes", [])}
+            if not check["evidence"]:
+                raise ValueError("Visual alignment failures need sceneId, absolute frame and note")
+            for finding in check["evidence"]:
+                if (not isinstance(finding, dict) or finding.get("sceneId") not in scene_by_id
+                        or not isinstance(finding.get("frame"), int) or finding["frame"] < 0
+                        or not isinstance(finding.get("note"), str) or not finding["note"].strip()):
+                    raise ValueError("Visual alignment failures need sceneId, absolute frame and note")
+                scene = scene_by_id[finding["sceneId"]]
+                if not (scene.get("startMs", 0) * 30 / 1000 <= finding["frame"]
+                        < scene.get("endMs", 0) * 30 / 1000):
+                    raise ValueError("Visual alignment frame must belong to its scene")
         checks[name] = check
     if data.get("soundPlanLock"):
         checks["audioLevels"] = sound.audio_level_check(workspace, workspace.resolve_path(preview))
@@ -237,6 +303,8 @@ def make_qa(workspace: Workspace, job_id: str, language: str, supplied: dict[str
     limitations = []
     if brief and payload(workspace, brief).get("screenshotUnavailable"):
         limitations.append("Product screenshot unavailable; sourced alternative used")
+    if (data.get("backgroundId") or data.get("background")) and any(scene.get("layout") == "custom" for scene in data.get("scenes", [])):
+        limitations.append("Inspect custom scenes for opaque fills that hide the selected background")
     layouts = [(scene.get("layout"), scene.get("motion", {}).get("mode")) for scene in data.get("scenes", [])]
     if any(layouts[index] == layouts[index + 1] == layouts[index + 2] for index in range(len(layouts) - 2)):
         limitations.append("Three consecutive scenes repeat the same layout")
@@ -273,9 +341,22 @@ def next_state(workspace: Workspace, job: dict[str, Any], language: str) -> dict
     if source and source["status"] != S.CHECKED.value:
         return {"jobId": job_id, "language": language, "step": "source-review",
                 "command": f"vidkit show {job_id}", "issues": [f"Source status: {source['status']}"]}
+    if job.get("workflow_version", 2) >= 10:
+        from . import library
+        brief_data = payload(workspace, workspace.latest_artifact(job_id, K.BRIEF, language))
+        available = library.entries(workspace)
+        for layer in backgrounds.resolve(brief_data.get("background"), available, require_motion=False)["backgroundLayers"]:
+            item = next(item for item in available if item["id"] == layer["id"] and item["version"] == layer["version"])
+            if item.get("status") == "candidate" and not item.get("previewValid"):
+                still = item.get("previewMode") == "still"
+                return {"jobId": job_id, "language": language,
+                        "step": "await-background-image-review" if still else "background-image-preview",
+                        "command": f"vidkit library show {item['id']}" if still else f"vidkit library preview {item['id']} --still-only",
+                        "afterImageApprovalCommand": f"vidkit library preview {item['id']}",
+                        "issues": ["Review the image before rendering the candidate motion clip; a still is not motion approval"]}
     if job.get("workflow_version", 2) >= 4 and not current_approval(workspace, job_id, language, "concept"):
         brief = workspace.latest_artifact(job_id, K.BRIEF, language)
-        record = workspace.job_dir(job_id, language) / "briefs" / "concept" / f"concept.r{brief['revision']}.json"
+        record = workspace.area(job_id, language, "briefs") / "concept" / f"concept.r{brief['revision']}.json"
         if not record.is_file():
             return {"jobId": job_id, "language": language, "step": "concept-preview",
                     "command": f"vidkit preview {job_id} {language} --stage concept", "issues": []}
@@ -283,10 +364,12 @@ def next_state(workspace: Workspace, job: dict[str, Any], language: str) -> dict
         from .checkpoints import current_renderer_lock, lock_diff
         from .library import locks_match
         if (evidence.get("briefSha256") != brief["sha256"] or not workspace.resolve_path(evidence["preview"]).is_file()
+                or not backgrounds.evidence_matches(evidence, payload(workspace, brief), job.get("workflow_version", 2))
                 or lock_diff(workspace, evidence.get("rendererLock", {}))
                 or evidence.get("rendererLock") != current_renderer_lock(
-                    workspace, job_id, language, payload(workspace, brief).get("conceptPreview", {}))
-                or not locks_match(workspace, {"themeLock": evidence.get("themeLock")})):
+                    workspace, job_id, language, {**payload(workspace, brief).get("conceptPreview", {}),
+                                                   **backgrounds.selection_fields(payload(workspace, brief))})
+                or not locks_match(workspace, backgrounds.lock_fields(evidence))):
             return {"jobId": job_id, "language": language, "step": "concept-preview-stale",
                     "command": f"vidkit preview {job_id} {language} --stage concept", "issues": ["Concept preview changed"]}
     if job["mode"] == "review" and not current_approval(workspace, job_id, language, "concept"):
@@ -327,6 +410,13 @@ def next_state(workspace: Workspace, job: dict[str, Any], language: str) -> dict
                         "command": command, "issues": ["Generate or import sound: " + item for item in missing]}
         if not workspace.latest_artifact(job_id, kind, language):
             return {"jobId": job_id, "language": language, "step": step, "command": command, "issues": []}
+        if kind == K.STORYBOARD and job.get("workflow_version", 2) >= 7:
+            storyboard = payload(workspace, workspace.latest_artifact(job_id, K.STORYBOARD, language))
+            brief = payload(workspace, workspace.latest_artifact(job_id, K.BRIEF, language))
+            if backgrounds.selection(storyboard) != backgrounds.selection(brief):
+                return {"jobId": job_id, "language": language, "step": "storyboard-background-stale",
+                        "command": f"vidkit add-storyboard {job_id} {language} <storyboard.json>",
+                        "issues": ["Storyboard background differs from approved creative brief"]}
         if kind == K.TIMELINE:
             timeline = workspace.latest_artifact(job_id, kind, language)
             timeline_data = payload(workspace, timeline)

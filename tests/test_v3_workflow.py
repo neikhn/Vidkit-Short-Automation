@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -82,11 +83,13 @@ class V3WorkflowTests(unittest.TestCase):
             preview_file = Path(directory) / "preview.mp4"
             preview_file.write_bytes(b"test-fixture")
             workspace.add_file_artifact(job, "en", K.PREVIEW, preview_file, S.NEEDS_REVIEW)
-            make_qa(workspace, job, "en")
+            with patch("vidkit.workflow.shutil.which", return_value=None):
+                make_qa(workspace, job, "en")
             approve(workspace, job, "en", "export", "Human")
             self.assertTrue(current_approval(workspace, job, "en", "export"))
-            make_qa(workspace, job, "en", {"checks": {"frameInspection": {
-                "status": "fail", "evidence": ["Title clips on phone"]}}})
+            with patch("vidkit.workflow.shutil.which", return_value=None):
+                make_qa(workspace, job, "en", {"checks": {"frameInspection": {
+                    "status": "fail", "evidence": ["Title clips on phone"]}}})
             with self.assertRaisesRegex(ValueError, "QA failed"):
                 approve(workspace, job, "en", "export", "Human")
             workspace.add_json_artifact(job, "en", K.TIMELINE, {"validationIssues": [], "missingAssets": []}, S.CHECKED)

@@ -1,6 +1,6 @@
 # Vidkit CLI workflow
 
-Runtime contract v4 for new jobs. Workspace paths are relative to `workspace/`; existing v2/v3 jobs keep their workflow. Run `vidkit next <job-id> --language vi --json` for the next missing or blocked stage. `vidkit show` lists revisions and checksums.
+Runtime contract v10 for new CLI jobs. Workspace paths are relative to `workspace/`; existing jobs keep their workflow. Run `vidkit next <job-id> --language vi --json` for the next missing or blocked stage. `vidkit show` lists revisions and checksums.
 
 ## Production sequence
 
@@ -55,9 +55,13 @@ Legacy v3 creative brief example (v4 adds the fields described below):
 
 For v4, `add-brief` requires `beats` with development and approach, two `explanationAlternatives`, `chosenExplanation`, and `conceptPreview.scenes` with hook/evidence/takeaway roles and provisional times. `preview --stage concept` renders a motion clip and three actual frames before audio. v3 retains its static frame behavior. Concept approval checks the current script, brief and preview; changing script or brief requires new approval.
 
+V7-v9 requires `backgroundId` in the brief. Pick one after the visual direction is defined: `vidkit library search --kind background`, then `library show` and `library preview <id>`. The PNG and MP4 show a fixture with two full loops. Theme controls color/type; background controls the global moving pattern. A candidate requires a current motion preview. Record the selected ID in the storyboard too. Changing background invalidates concept approval and timed visual outputs, while unchanged audio/STT remain reusable.
+
+For v10, read [layered background design](background-design.md). Use `background: {"patternId": "straight-grid", "effectIds": []}` in both brief and storyboard. Search the two new library kinds; new candidates use `library preview <id> --still-only` before user-reviewed motion. The example below is the retained v7-v9 storyboard format.
+
 If valid audio exists, concept scenes reuse matching source ranges. Set `audioStartMs` to select the narration segment when provisional scene times differ from the recording. Explicit ranges outside the audio fail validation; unmapped ranges that exceed the recording stay silent and are listed in concept metadata. Timing remains provisional and must be reviewed after STT.
 
-Add a job-specific TSX visual with `vidkit add-visual <id> vi <manifest.json>`, then `vidkit preview-visual <id> vi <visual-id>`. A manifest needs `kind: component`, `id`, semantic `version`, `description`, `propsSchema`, `entrypoint` and `fixture`. The fixture is a Remotion props JSON whose scene uses the component ID. Package local imports with the source; code lives under the job's `visuals/` directory. `vidkit checkpoint <id> vi` copies source and renderer dependencies; `vidkit diff <id> vi` compares the latest copy to current edits.
+Add a job-specific TSX visual with `vidkit add-visual <id> vi <manifest.json>`, then `vidkit preview-visual <id> vi <visual-id>`. A manifest needs `kind: component`, `id`, semantic `version`, `description`, `propsSchema`, `entrypoint` and `fixture`. The fixture is a Remotion props JSON whose scene uses the component ID. Package local imports with the source; code lives under the job's `edit/visuals/` directory. `vidkit checkpoint <id> vi` records source and renderer dependencies; `vidkit diff <id> vi` compares the latest snapshot to current edits. Put manual prep under `vidkit workdir <id> --language vi`; never edit the old duplicate paths left by a copy-only workspace migration.
 
 ## Caption plan
 
@@ -74,13 +78,20 @@ Groups partition all normalized transcript words, with no gap, repeat or reorder
 
 ## Storyboard
 
-Use `schemaVersion: 4` for new jobs, `language`, `theme`, and non-empty `scenes`. Each scene requires `id`, `layout`, `title`, `startAnchor.wordIndex`, `endAnchor.wordIndex`, and `development` with understanding/object/action/result/connection. Word ranges partition the full transcript. Existing layouts remain, and `layout: custom` selects a registered component with `component`, `componentVersion`, and `componentProps`. Optional `entities`, `events`, `continuityGroup`, `referenceIds` and `focusRect` support visual progression. Events use `wordIndex` or `after`, optional `offsetFrames`, `durationFrames` and `holdFrames`; Python computes frames and rejects cycles or overflow.
+Use `schemaVersion: 4` for new jobs, `language`, `theme`, `backgroundId` (v7-v9) or `background` (v10), and non-empty `scenes`. Each scene requires `id`, `layout`, `title`, `startAnchor.wordIndex`, `endAnchor.wordIndex`, and `development` with understanding/object/action/result/connection. Word ranges partition the full transcript. Existing layouts remain, and `layout: custom` selects a registered component with `component`, `componentVersion`, and `componentProps`. Optional `entities`, `events`, `continuityGroup`, `referenceIds` and `focusRect` support visual progression. Events use `wordIndex` or `after`, optional `offsetFrames`, `durationFrames` and `holdFrames`; Python computes frames and rejects cycles or overflow.
+
+V5–v7 keeps storyboard schema 4 and ends with a follow-and-comment `cta-end-card`. V8 ends with exactly one `role: "cta"`, `layout: "custom"`, `component: "channel-cta"` scene of at least four seconds. The script CTA has `spokenText`, `likePhrase`, and `subscribePhrase`; the latter says the full spoken channel name (VI: Hãy Cùng Bắt Đầu AI; EN: AI Lens). The component shows HCDB AI in VI and AI Lens in EN. The storyboard includes `like-click` on entity `like` and `subscribe-click` on entity `subscribe`, each anchored to words in its spoken phrase. Like precedes Subscribe, and the last pressed state has time to be seen. The brief's `conceptPreview.scenes` ends in the same component with provisional click timing. Final timing comes from the transcript. Do not append a silent tail or upgrade existing jobs automatically.
+
+V9+ uses `cta: {"spokenText": "...", "followPhrase": "...", "interactionPhrase": "..."}` in the script. The spoken CTA says the full channel name and invites following plus interaction, without naming individual buttons. The final concept/storyboard scene is `role: "cta"`, `layout: "custom"`, `component: "channel-cta-strip"`, at least five seconds; omit click events. The component times Like → Subscribe → bell clicks across the scene duration, while transcript word anchors set the scene start/end and subtitle timing. Inspect all three pressed states and the last frame at 360×640. V8 and earlier jobs retain their own contract.
+
+V6 adds horizontal centering for the complete primary visual group. The title, heading and source remain left-aligned. The CLI marks new concept and compiled scenes with `visualAlignment: "centered"`; existing timelines retain their original placement. In QA, use `checks.visualAlignment` with `pass`, `fail` or `not-run`. A failure's evidence is an array of `{ "sceneId": "...", "frame": 120, "note": "..." }` using absolute video frames; never mark uninspected custom visuals as pass.
 
 ```json
 {
   "schemaVersion": 4,
   "language": "vi",
   "theme": "dark-grid",
+  "backgroundId": "grid-drift",
   "scenes": [
     {
       "id": "hook",
@@ -104,5 +115,7 @@ The example shows one scene shape; a real storyboard must cover the last word. C
 ## Library and QA
 
 `vidkit library search/show/preview/add/approve` operates on manifests and source packages. After `library add`, run `library preview <candidate-id>` before using or approving it; a manifest, source or fixture edit requires another preview. Components may declare a TSX `entrypoint` without `baseComponent`, or configure an existing base. Fixtures must exercise the candidate ID and props; themes must use their ID and exact style tokens. Preview includes a motion clip. Approved source and fixtures are Git-versioned under `renderer/library/`; candidates are under ignored `workspace/library/`. Promotion copies the package and remains independent of export approval.
+
+Background candidates declare `kind: "background"`, `entrypoint`, `loopSeconds` (2–30), and a fixture whose `backgroundId` and `backgroundLoopSeconds` match for at least two loops. Their TSX receives theme colors and a periodic `phase` from the global Remotion frame. Review the clip seam and readability with captions before approval. `checks.backgroundMotion` records pass/fail/not-run for final QA; custom opaque scene fills need visual inspection.
 
 `vidkit qa` writes a report with `automatic`, `mediaProbe`, `frameInspection`, `transitionReview`, `fullPlayback`, and `audioListening`. Each is `pass`, `fail`, or `not-run` with evidence. A review file passed to `vidkit qa <id> vi <file>` supplies the last four checks. An export approval is tied to the current timeline, preview and QA revisions. `render` in review mode requires that explicit approval. Automatic export still blocks on validation failure and never claims that unperformed viewing/listening occurred.

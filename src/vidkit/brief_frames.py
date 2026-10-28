@@ -33,7 +33,7 @@ def render_brief_frames(workspace: Workspace, job_id: str, language: str,
     style = show(workspace, theme)["style"]
     background, foreground, accent = style["background"], style["text"], style["accent"]
     output: dict[str, str] = {}
-    root = workspace.job_dir(job_id, language) / "briefs" / f"frames.r{revision}"
+    root = workspace.area(job_id, language, "briefs") / f"frames.r{revision}"
     root.mkdir(parents=True, exist_ok=True)
     for name in ("hook", "evidence", "takeaway"):
         frame = frames[name]

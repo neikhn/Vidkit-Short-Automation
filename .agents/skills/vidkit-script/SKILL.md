@@ -10,6 +10,7 @@ Output: script bundle under the [handoff contract](../vidkit-pipeline/references
 
 ## Workflow
 1. Choose one concrete promise or question. Structure the story around hook, identity, evidence, mechanism, limitation and takeaway where appropriate.
+   For v5–v8 jobs, retain that job's CTA contract. For new v9 jobs, close with a topic-specific invitation to follow and interact: `cta: {"spokenText": "...", "followPhrase": "...", "interactionPhrase": "..."}`. Both phrases occur in the spoken text, which also says “Hãy Cùng Bắt Đầu AI” for `vi` or “AI Lens” for `en`; only the visual shortens the Vietnamese name to HCDB AI. End both `expected_spoken_text` and `tts_input` with this CTA; Eleven v3 audio tags may be present in the latter. Adapt the reason to the episode: “If [topic insight helped], follow [spoken channel name] and join the conversation for [specific next value].” The visual may show Like, Subscribe and bell clicks, but the voice need not name the buttons. Do not append a silent end card or require a comment question.
 2. Attach claim references to factual statements and stable IDs to narrative beats.
 3. Write Vietnamese and English as natural localized narration, preserving numbers, uncertainty and meaning. Do not translate idioms literally.
 4. Target 45–75 seconds by default, but label length as estimated until actual narration is available.

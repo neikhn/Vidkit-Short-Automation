@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from .assets import load_asset_manifest, prepare_asset_entry
+from .channels import cta_props
 from .config import load_env_file, voice_id_for
 from .elevenlabs import ElevenLabsClient
 from .media import audio_duration
 from .models import ArtifactKind, ArtifactStatus, Mode
 from .render import prepare_renderer_job, remotion_command, run_render, run_studio
 from .runtime import resolve_node
-from . import checkpoints, library, sound, visuals, workflow
+from . import backgrounds, checkpoints, library, sound, visuals, workflow, workspace_layout
 from .script_bundle import validate_script_bundle
 from .storage import Workspace, sha256_file, slugify
 from .subtitles import render_srt, render_vtt
@@ -49,6 +50,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init")
     sub.add_parser("migrate")
+    workspace_command = sub.add_parser("workspace")
+    workspace_sub = workspace_command.add_subparsers(dest="workspace_command", required=True)
+    workspace_sub.add_parser("audit")
+    workspace_sub.add_parser("verify")
+    workspace_migrate = workspace_sub.add_parser("migrate")
+    migration_mode = workspace_migrate.add_mutually_exclusive_group()
+    migration_mode.add_argument("--dry-run", action="store_true")
+    migration_mode.add_argument("--apply", action="store_true")
+    workdir = sub.add_parser("workdir")
+    workdir.add_argument("job_id")
+    workdir.add_argument("--language")
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--json", action="store_true")
 
@@ -57,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--languages", default="vi,en")
     create.add_argument("--mode", choices=[mode.value for mode in Mode], default=Mode.REVIEW.value)
     create.add_argument("--source-url")
-    create.add_argument("--workflow-version", type=int, choices=[2, 3, 4], default=4,
+    create.add_argument("--workflow-version", type=int, choices=[2, 3, 4, 5, 6, 7, 8, 9, 10], default=10,
                         help=argparse.SUPPRESS)
 
     for name in ("checkpoint", "diff"):
@@ -180,6 +192,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("show", "preview"):
         command = library_commands.add_parser(name)
         command.add_argument("entry_id")
+        if name == "preview":
+            command.add_argument("--still-only", action="store_true", help="Render an image without motion approval evidence")
     lib_add = library_commands.add_parser("add")
     lib_add.add_argument("file", type=Path)
     lib_approve = library_commands.add_parser("approve")
@@ -237,9 +251,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Initialized {workspace.workspace_root}")
         elif args.command == "migrate":
             print(json.dumps(workspace.migrate_legacy(), ensure_ascii=False, indent=2))
+        elif args.command == "workspace":
+            if args.workspace_command == "migrate":
+                result = workspace_layout.migrate(workspace, apply=args.apply)
+            else:
+                result = workspace_layout.audit(workspace, hashes=args.workspace_command == "verify")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            if result.get("problems"):
+                return 1
+        elif args.command == "workdir":
+            workspace.get_job(args.job_id)
+            print(workspace.workdir(args.job_id, args.language))
         elif args.command == "doctor":
             _doctor(workspace, args.json)
         elif args.command == "create":
+            if args.workflow_version >= 8 and any(language.strip() and language.strip() not in {"vi", "en"}
+                                                   for language in args.languages.split(",")):
+                raise ValueError("Workflows v8+ support vi and en channel CTAs only")
             print(
                 workspace.create_job(
                     args.topic, args.languages.split(","), Mode(args.mode), args.source_url,
@@ -272,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(sound.recover_request(workspace, args.job_id, args.language,
                     args.request_id, args.file), ensure_ascii=False, indent=2))
             elif args.audio_command == "requests":
-                request_dir = workspace.job_dir(args.job_id, args.language) / "audio" / "sound-plan" / "requests"
+                request_dir = workspace.area(args.job_id, args.language, "audio") / "sound-plan" / "requests"
                 print(json.dumps([json.loads(path.read_text(encoding="utf-8"))
                                   for path in sorted(request_dir.glob("*.json"))], ensure_ascii=False, indent=2))
             else:
@@ -382,11 +410,12 @@ def _library(workspace: Workspace, args: argparse.Namespace) -> None:
     elif args.library_command in {"show", "preview"}:
         result = library.show(workspace, args.entry_id)
         if args.library_command == "preview":
-            preview_path = library.preview(workspace, args.entry_id)
+            preview_path = library.preview(workspace, args.entry_id, still_only=args.still_only)
             result = {"id": result["id"], "version": result["version"],
                       "preview": str(preview_path),
                       "motionPreview": str(preview_path.with_suffix(".mp4")) if result.get("entrypoint")
-                      and isinstance(preview_path, Path) else None,
+                      and isinstance(preview_path, Path) and not args.still_only else None,
+                      "loopSeconds": result.get("loopSeconds"),
                       "description": result["description"], "useCases": result["useCases"],
                       "limitations": result["limitations"]}
     elif args.library_command == "add":
@@ -400,6 +429,10 @@ def _library(workspace: Workspace, args: argparse.Namespace) -> None:
             item["storyboardUse"] = (
                 {"component": item["id"], "componentVersion": item["version"]}
                 if item["kind"] == "component" and item["status"] in {"approved", "candidate"}
+                else {"backgroundId": item["id"]} if item["kind"] == "background"
+                and item["status"] in {"approved", "candidate"}
+                else {"background": {"patternId": item["id"], "effectIds": []}} if item["kind"] == "background-pattern"
+                else {"background": {"patternId": "<selected-pattern>", "effectIds": [item["id"]]}} if item["kind"] == "background-effect"
                 else None
             )
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -535,7 +568,10 @@ def _validate_source_pack(payload: dict[str, Any]) -> list[str]:
 
 def _add_script(workspace: Workspace, job_id: str, language: str, file: Path) -> None:
     payload = load_json(file)
-    errors = validate_script_bundle(payload)
+    workflow_version = workspace.get_job(job_id).get("workflow_version", 2)
+    errors = validate_script_bundle(payload, require_cta=5 <= workflow_version < 8,
+                                    channel_cta_language=language if workflow_version == 8 else None,
+                                    engagement_cta_language=language if workflow_version >= 9 else None)
     if errors:
         raise ValueError("; ".join(errors))
     workspace.invalidate_downstream(job_id, language, ArtifactKind.SCRIPT)
@@ -590,7 +626,16 @@ def _add_storyboard(workspace: Workspace, job_id: str, language: str, file: Path
     payload = load_json(file)
     if payload.get("language") and payload["language"] != language:
         raise ValueError(f"Storyboard language {payload['language']} does not match {language}")
-    errors = validate_storyboard_shape(payload)
+    workflow_version = workspace.get_job(job_id).get("workflow_version", 2)
+    errors = validate_storyboard_shape(payload, require_cta=workflow_version >= 5,
+                                       require_background=7 <= workflow_version < 10,
+                                       require_background_stack=workflow_version >= 10,
+                                       require_channel_cta=workflow_version == 8,
+                                       require_engagement_cta=workflow_version >= 9)
+    if workflow_version >= 7:
+        brief = require_artifact(workspace, job_id, language, ArtifactKind.BRIEF)
+        if not errors and backgrounds.selection(payload) != backgrounds.selection(read_artifact_json(workspace, brief)):
+            errors.append("Storyboard background differs from approved creative brief")
     if errors:
         raise ValueError("; ".join(errors))
     workspace.invalidate_downstream(job_id, language, ArtifactKind.STORYBOARD)
@@ -744,6 +789,8 @@ def _timeline(workspace: Workspace, job_id: str, language: str, draft: bool) -> 
                 raise ValueError("Creative brief requests sound design; add a sound plan before compiling")
             if storyboard.get("theme", "dark-grid") != brief["theme"]:
                 raise ValueError("Storyboard theme differs from approved creative brief; revise brief and approval")
+            if (job_info.get("workflow_version", 2) >= 7 or brief.get("background") is not None) and backgrounds.selection(storyboard) != backgrounds.selection(brief):
+                raise ValueError("Storyboard background differs from approved creative brief; revise brief and approval")
             if job_info.get("workflow_version", 2) >= 4:
                 reference_ids = {item["id"] for item in brief.get("references", [])}
                 for scene in storyboard.get("scenes", []):
@@ -761,9 +808,17 @@ def _timeline(workspace: Workspace, job_id: str, language: str, draft: bool) -> 
             ([*library.entries(workspace), *visuals.entries(workspace, job_id, language)]
              if workspace.get_job(job_id).get("workflow_version", 2) >= 4 else
              library.entries(workspace) if workspace.get_job(job_id).get("workflow_version", 2) >= 3 else None),
+            require_cta=job_info.get("workflow_version", 2) >= 5,
+            center_visuals=job_info.get("workflow_version", 2) >= 6,
+            require_background=7 <= job_info.get("workflow_version", 2) < 10,
+            require_background_stack=job_info.get("workflow_version", 2) >= 10 or storyboard.get("background") is not None,
+            channel_cta=script.get("cta") if job_info.get("workflow_version", 2) >= 8 else None,
+            engagement_cta=job_info.get("workflow_version", 2) >= 9,
         )
     job = workspace.get_job(job_id)
     sound.compile_sound(workspace, job_id, language, timeline, transcript["words"])
+    from .lead_in import apply_lead_in
+    apply_lead_in(timeline, 0 if draft else storyboard.get("leadInMs", 0))
     if job.get("workflow_version", 2) >= 3:
         timeline["schemaVersion"] = 3
         timeline["rendererCodeSha256"] = sha256_file(workspace.project_root / "renderer" / "src" / "VidkitShort.tsx")
@@ -865,7 +920,7 @@ def _remotion(workspace: Workspace, job_id: str, language: str, action: str) -> 
             raise RuntimeError("Renderer dependencies changed since timeline compilation; rebuild timeline and preview")
         if not library.locks_match(workspace, timeline,
                                    visuals.entries(workspace, job_id, language) if is_v4 else None):
-            raise RuntimeError("A locked theme, component or effect changed; rebuild timeline and preview")
+            raise RuntimeError("A locked theme, background, component or effect changed; rebuild timeline and preview")
         if audio_artifact["sha256"] != sha256_file(workspace.resolve_path(audio_artifact)):
             raise RuntimeError("Audio checksum differs from tracked artifact")
     props = prepare_renderer_job(
@@ -881,7 +936,9 @@ def _remotion(workspace: Workspace, job_id: str, language: str, action: str) -> 
         else:
             checkpoint_revision = changes["checkpoint"]
     if action == "studio":
-        output = workspace.job_root(job_id) / "exports" / f"{slugify(job['topic'])}.{language}.studio.mp4"
+        export_dir = (workspace.area(job_id, language, "exports") if workspace.layout_version(job_id) >= 2
+                      else workspace.job_root(job_id) / "exports")
+        output = export_dir / f"{slugify(job['topic'])}.{language}.studio.mp4"
         return run_studio(workspace.project_root, props, output, entrypoint)
     if timeline.get("missingAssets"):
         raise RuntimeError("Cannot export: required assets are missing")
@@ -926,7 +983,9 @@ def _remotion(workspace: Workspace, job_id: str, language: str, action: str) -> 
             upstream=upstream,
             metadata={"renderer": "remotion", "format": "1080x1920@30",
                       "theme": timeline.get("theme"), "componentLocks": timeline.get("componentLocks", []),
-                      "themeLock": timeline.get("themeLock"), "effectLocks": timeline.get("effectLocks", []),
+                      "themeLock": timeline.get("themeLock"), "backgroundId": timeline.get("backgroundId"),
+                      "backgroundLock": timeline.get("backgroundLock"), "effectLocks": timeline.get("effectLocks", []),
+                      "background": timeline.get("background"), "backgroundLayers": timeline.get("backgroundLayers"),
                       "soundPlanLock": timeline.get("soundPlanLock"),
                       "soundAssets": [{"id": track["asset"]["id"], "sha256": track["asset"]["sha256"]}
                                       for track in timeline.get("soundTracks", [])],
@@ -974,8 +1033,9 @@ def _concept_preview(workspace: Workspace, job_id: str, language: str, selection
     brief_artifact = require_artifact(workspace, job_id, language, ArtifactKind.BRIEF)
     brief = read_artifact_json(workspace, brief_artifact)
     source_scenes = brief["conceptPreview"]["scenes"]
+    selected_roles = {"hook", "evidence", "cta"} if job.get("workflow_version", 2) >= 5 else {"hook", "evidence"}
     selected = set(selection.split(",")) if selection else {
-        scene["id"] for scene in source_scenes if scene["role"] in {"hook", "evidence"}
+        scene["id"] for scene in source_scenes if scene["role"] in selected_roles
     }
     if not selected or selected - {scene["id"] for scene in source_scenes}:
         raise ValueError("--scenes contains an unknown concept scene")
@@ -993,6 +1053,11 @@ def _concept_preview(workspace: Workspace, job_id: str, language: str, selection
             continue
         scene = copy.deepcopy(original)
         scene["componentId"] = scene.get("componentId", scene.get("component"))
+        if job.get("workflow_version", 2) >= 8 and scene.get("role") == "cta":
+            scene["componentProps"] = {**scene.get("componentProps", {}), **cta_props(language)}
+            scene.pop("events", None)  # Concept clicks use provisional timing, never stale word anchors.
+        if job.get("workflow_version", 2) >= 6:
+            scene["visualAlignment"] = "centered"
         duration = scene["endMs"] - scene["startMs"]
         source_start = scene.get("audioStartMs", scene["startMs"])
         if audio_path and 0 <= source_start and source_start + duration <= audio_ms:
@@ -1007,12 +1072,18 @@ def _concept_preview(workspace: Workspace, job_id: str, language: str, selection
     props_data = {"schemaVersion": 4, "language": language, "title": job["topic"],
                   "audioSrc": "", "theme": brief["theme"], "durationSeconds": cursor / 1000,
                   "captions": [], "scenes": scenes}
+    if job.get("workflow_version", 2) >= 10 or brief.get("background") is not None:
+        props_data.update(backgrounds.resolve(brief.get("background"), library.entries(workspace)))
+    elif job.get("workflow_version", 2) >= 7:
+        background_entry = library.show(workspace, brief["backgroundId"])
+        props_data["backgroundId"] = background_entry["id"]
+        props_data["backgroundLoopSeconds"] = background_entry["loopSeconds"]
     props_data["audioSegments"] = audio_segments
     theme_entry = library.show(workspace, brief["theme"])
     props_data["themeData"] = theme_entry["style"]
     props = prepare_renderer_job(workspace, job_id, language, props_data, audio_path if audio_segments else None)
     entry = visuals.render_entry(workspace, job_id, language, props_data)
-    output_dir = workspace.job_dir(job_id, language) / "briefs" / "concept"
+    output_dir = workspace.area(job_id, language, "briefs") / "concept"
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"concept.r{brief_artifact['revision']}.mp4"
     code = run_render(workspace.project_root, props, output, entry)
@@ -1021,12 +1092,18 @@ def _concept_preview(workspace: Workspace, job_id: str, language: str, selection
     complete_scenes = copy.deepcopy(source_scenes)
     for scene in complete_scenes:
         scene["componentId"] = scene.get("componentId", scene.get("component"))
+        if job.get("workflow_version", 2) >= 8 and scene.get("role") == "cta":
+            scene["componentProps"] = {**scene.get("componentProps", {}), **cta_props(language)}
+            scene.pop("events", None)
+        if job.get("workflow_version", 2) >= 6:
+            scene["visualAlignment"] = "centered"
     complete = {**props_data, "scenes": complete_scenes,
                 "durationSeconds": max(scene["endMs"] for scene in source_scenes) / 1000}
     complete_props = prepare_renderer_job(workspace, job_id, language, complete, None)
     complete_entry = visuals.render_entry(workspace, job_id, language, complete)
     frames = {}
-    for role in ("hook", "evidence", "takeaway"):
+    frame_roles = ("hook", "evidence", "takeaway", "cta") if job.get("workflow_version", 2) >= 5 else ("hook", "evidence", "takeaway")
+    for role in frame_roles:
         scene = next(item for item in source_scenes if item["role"] == role)
         frame = max(0, round((scene["startMs"] + scene["endMs"]) / 2000 * 30))
         target = output_dir / f"{role}.r{brief_artifact['revision']}.png"
@@ -1049,6 +1126,13 @@ def _concept_preview(workspace: Workspace, job_id: str, language: str, selection
     metadata["rendererLock"] = checkpoints.current_renderer_lock(workspace, job_id, language, complete)
     metadata["themeLock"] = {"id": theme_entry["id"], "version": theme_entry["version"],
                              "sha256": theme_entry["sha256"]}
+    if job.get("workflow_version", 2) >= 10 or brief.get("background") is not None:
+        metadata.update(backgrounds.lock_fields(props_data))
+        metadata["background"] = props_data["background"]
+        metadata["themeLock"] = {"id": theme_entry["id"], "version": theme_entry["version"], "sha256": theme_entry["sha256"]}
+    elif job.get("workflow_version", 2) >= 7:
+        metadata["backgroundLock"] = {"id": background_entry["id"], "version": background_entry["version"],
+                                      "sha256": background_entry["sha256"]}
     (output_dir / f"concept.r{brief_artifact['revision']}.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     print(output)
@@ -1074,7 +1158,7 @@ def _add_feedback(workspace: Workspace, job_id: str, language: str, source: Path
     minutes = data.get("reviewMinutes")
     if minutes is not None and (not isinstance(minutes, (int, float)) or minutes < 0):
         raise ValueError("reviewMinutes must be nonnegative")
-    root = workspace.job_dir(job_id, language) / "feedback"
+    root = workspace.area(job_id, language, "feedback")
     root.mkdir(parents=True, exist_ok=True)
     revision = len(list(root.glob("feedback.r*.json"))) + 1
     record = {"timelineRevision": timeline["revision"], "timelineSha256": timeline["sha256"],
@@ -1088,7 +1172,7 @@ def _add_feedback(workspace: Workspace, job_id: str, language: str, source: Path
 
 def _metrics(workspace: Workspace, job_id: str, language: str) -> None:
     workspace.get_job(job_id)
-    root = workspace.job_dir(job_id, language) / "feedback"
+    root = workspace.area(job_id, language, "feedback")
     feedback = [json.loads(path.read_text(encoding="utf-8")) for path in root.glob("feedback.r*.json")]
     revisions = workspace.list_artifacts(job_id)
     previews = [item for item in revisions if item["kind"] == ArtifactKind.PREVIEW.value

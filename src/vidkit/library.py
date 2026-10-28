@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .storage import Workspace, sha256_file, slugify
+from .backgrounds import KINDS as LAYER_KINDS
 
 
 def _builtins(workspace: Workspace) -> list[dict[str, Any]]:
@@ -25,7 +26,7 @@ def _builtins(workspace: Workspace) -> list[dict[str, Any]]:
                          "limitations": ["Demo content must be adapted and checked before production use"],
                          "propsSchema": {}, "source": "https://remotion-bits.dev/docs/getting-started/",
                          "license": "MIT", "preview": "BitsGallery"})
-    return [*manifest["components"], *manifest["themes"], *manifest.get("effects", []),
+    return [*manifest["components"], *manifest["themes"], *manifest.get("backgrounds", []), *manifest.get("effects", []),
             *manifest.get("references", []), *bits]
 
 
@@ -52,7 +53,7 @@ def entries(workspace: Workspace) -> list[dict[str, Any]]:
             item["sourcePaths"] = [str((base / name).resolve()) for name in item.get("files", [])]
             item["sourceChecksums"] = {name: sha256_file(base / name) if (base / name).is_file() else None
                                        for name in item.get("files", [])}
-        if item.get("status") == "candidate" and item.get("kind") in {"component", "theme"}:
+        if item.get("status") == "candidate" and item.get("kind") in {"component", "theme", "background", *LAYER_KINDS}:
             item["previewValid"] = candidate_preview_valid(workspace, item)
         if item.get("kind") == "asset":
             item["manifestSha256"] = checksum(item)
@@ -67,11 +68,18 @@ def checksum(entry: dict[str, Any]) -> str:
         "fixtureSha256", "previewImage", "previewSha256", "previewManifestSha256", "checkedAt",
         "previewValid", "previewClip", "previewClipSha256",
         "entrypointAbsolute", "sourcePaths",
+        "previewMode", "previewDependencyHashes",
     }}
     return hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def candidate_preview_valid(workspace: Workspace, item: dict[str, Any]) -> bool:
+    if item.get("previewMode") == "still":
+        return False
+    for relative, expected in item.get("previewDependencyHashes", {}).items():
+        path = (workspace.project_root / relative).resolve()
+        if not path.is_relative_to(workspace.project_root) or not path.is_file() or sha256_file(path) != expected:
+            return False
     if (not item.get("fixtureSha256") or not item.get("previewSha256")
             or item.get("previewManifestSha256") != checksum(item)):
         return False
@@ -89,8 +97,11 @@ def locks_match(workspace: Workspace, timeline: dict[str, Any],
     current = {(item["id"], item["version"]): item["sha256"]
                for item in [*entries(workspace), *(extra_entries or [])]}
     locks = [*timeline.get("componentLocks", []), *timeline.get("effectLocks", [])]
+    locks.extend(timeline.get("backgroundLayers") or [])
     if timeline.get("themeLock"):
         locks.append(timeline["themeLock"])
+    if timeline.get("backgroundLock"):
+        locks.append(timeline["backgroundLock"])
     return all(current.get((item["id"], item["version"])) == item.get("sha256") for item in locks)
 
 
@@ -110,7 +121,7 @@ def search(workspace: Workspace, query: str = "", **filters: str | None) -> list
             continue
         if theme and entry.get("themes") and theme not in entry["themes"]:
             continue
-        entry_aspect = entry.get("aspect", "portrait" if entry["kind"] in {"component", "theme", "effect"} else None)
+        entry_aspect = entry.get("aspect", "portrait" if entry["kind"] in {"component", "theme", "background", "effect", *LAYER_KINDS} else None)
         if aspect and entry_aspect != aspect:
             continue
         result.append(entry)
@@ -134,12 +145,17 @@ def add_candidate(workspace: Workspace, source: Path) -> dict[str, Any]:
     missing = required - item.keys()
     if missing:
         raise ValueError(f"Library manifest missing: {', '.join(sorted(missing))}")
-    if item["kind"] not in {"component", "theme", "asset"}:
+    if item["kind"] not in {"component", "theme", "background", "asset", *LAYER_KINDS}:
         raise ValueError("Unsupported library entry kind")
     if item["kind"] == "component":
         builtin_ids = {entry["id"] for entry in _builtins(workspace) if entry["kind"] == "component"}
         if not item.get("entrypoint") and item.get("baseComponent") not in builtin_ids:
             raise ValueError("Candidate component requires a tested baseComponent from the built-in registry")
+    if item["kind"] in {"background", *LAYER_KINDS}:
+        if (not str(item.get("entrypoint", "")).endswith(".tsx")
+                or not isinstance(item.get("loopSeconds"), (int, float))
+                or not 2 <= item["loopSeconds"] <= 30):
+            raise ValueError("Candidate background needs a TSX entrypoint and loopSeconds between 2 and 30")
     if item["kind"] == "theme":
         style = item.get("style", {})
         if not {"background", "surface", "text", "muted", "accent", "pattern",
@@ -165,7 +181,9 @@ def add_candidate(workspace: Workspace, source: Path) -> dict[str, Any]:
         if not fixture.is_file() or fixture.suffix.lower() != ".json":
             raise ValueError("Candidate preview must point to an existing JSON fixture")
         fixture_data = json.loads(fixture.read_text(encoding="utf-8"))
-        if fixture_data.get("schemaVersion") not in {3, 4} or not fixture_data.get("scenes") or fixture_data.get("durationSeconds", 0) <= 0:
+        if (fixture_data.get("schemaVersion") not in {3, 4} or not isinstance(fixture_data.get("scenes"), list)
+                or (not fixture_data["scenes"] and item["kind"] not in LAYER_KINDS)
+                or fixture_data.get("durationSeconds", 0) <= 0):
             raise ValueError("Candidate fixture must be a v3/v4 Remotion props JSON with scenes and duration")
         expected_component = item["id"] if item.get("entrypoint") else item.get("baseComponent")
         if item["kind"] == "component" and not any(
@@ -173,6 +191,18 @@ def add_candidate(workspace: Workspace, source: Path) -> dict[str, Any]:
             for scene in fixture_data["scenes"]
         ):
             raise ValueError("Candidate fixture must show its component")
+        if item["kind"] == "background" and (
+            fixture_data.get("backgroundId") != item["id"]
+            or fixture_data.get("backgroundLoopSeconds") != item["loopSeconds"]
+            or fixture_data["durationSeconds"] < 2 * item["loopSeconds"]
+        ):
+            raise ValueError("Background fixture must select the candidate for at least two complete loops")
+        if item["kind"] in LAYER_KINDS:
+            from .backgrounds import normalize
+            config = normalize(fixture_data.get("background"))
+            selected = config["patternId"] == item["id"] if item["kind"] == "background-pattern" else item["id"] in config["effectIds"]
+            if not selected or fixture_data["durationSeconds"] < 2 * item["loopSeconds"]:
+                raise ValueError("Layer fixture must select the candidate for at least two complete loops")
         if item["kind"] == "theme" and (
             fixture_data.get("theme") != item["id"] or fixture_data.get("themeData") != item["style"]
         ):
@@ -204,7 +234,7 @@ def add_candidate(workspace: Workspace, source: Path) -> dict[str, Any]:
     return item
 
 
-def preview(workspace: Workspace, entry_id: str) -> Path | str:
+def preview(workspace: Workspace, entry_id: str, *, still_only: bool = False) -> Path | str:
     from .render import remotion_command
     item = show(workspace, entry_id)
     if item["status"] == "reference":
@@ -240,24 +270,47 @@ def preview(workspace: Workspace, entry_id: str) -> Path | str:
     target = workspace.workspace_root / "library" / "previews" / f"{slugify(item['id'])}-{slugify(item['version'])}.png"
     target.parent.mkdir(parents=True, exist_ok=True)
     entrypoint = "src/index.ts"
+    fixture_data = json.loads(fixture.read_text(encoding="utf-8"))
+    render_fixture = fixture
+    dependencies = [item]
+    if fixture_data.get("background") is not None:
+        from .backgrounds import resolve
+        fixture_data.update(resolve(fixture_data["background"], entries(workspace), require_motion=False))
+        dependencies.extend(show(workspace, layer["id"], layer["version"]) for layer in fixture_data["backgroundLayers"]
+                            if layer["id"] != item["id"])
+        render_fixture = workspace.cache_root / "library" / f"{slugify(item['id'])}-props.json"
+        render_fixture.parent.mkdir(parents=True, exist_ok=True)
+        render_fixture.write_text(json.dumps(fixture_data, ensure_ascii=False), encoding="utf-8")
     if item.get("entrypoint"):
         from .visuals import render_entry
+        if fixture_data.get("backgroundId") and fixture_data["backgroundId"] != item["id"]:
+            dependencies.append(show(workspace, fixture_data["backgroundId"]))
         entrypoint = str(render_entry(workspace, "library", item["id"],
-                                      json.loads(fixture.read_text(encoding="utf-8")), [item]))
+                                      fixture_data, dependencies))
+    frame = round(item.get("loopSeconds", 12) * 30 / 4) if item["kind"] in LAYER_KINDS else 30
     command = [*remotion_command(workspace.project_root), "still", entrypoint, "VidkitShort",
-               str(target), "--props", str(fixture), "--frame", "30", "--scale", "0.333", "--overwrite"]
+               str(target), "--props", str(render_fixture), "--frame", str(frame),
+               "--scale", "1" if still_only or item["kind"] in LAYER_KINDS else "0.333", "--overwrite", "--log", "error"]
     result = subprocess.run(command, cwd=workspace.project_root / "renderer", check=False)
     if result.returncode != 0:
         raise RuntimeError(f"Library preview render failed: {result.returncode}")
     clip = None
-    if item.get("entrypoint"):
+    if item.get("entrypoint") and not still_only:
         clip = target.with_suffix(".mp4")
         motion = [*remotion_command(workspace.project_root), "render", entrypoint, "VidkitShort",
-                  str(clip), "--props", str(fixture), "--scale", "0.5", "--overwrite"]
+                  str(clip), "--props", str(render_fixture), "--scale",
+                  "1" if item["kind"] in LAYER_KINDS else "0.5", "--overwrite", "--log", "error"]
         result = subprocess.run(motion, cwd=workspace.project_root / "renderer", check=False)
         if result.returncode:
             raise RuntimeError(f"Component motion preview failed: {result.returncode}")
     if item["status"] == "candidate":
+        item["previewMode"] = "still" if still_only else "motion" if clip else "image"
+        if still_only:
+            item.pop("previewClip", None)
+            item.pop("previewClipSha256", None)
+        item["previewDependencyHashes"] = {
+            Path(path).relative_to(workspace.project_root).as_posix(): sha256_file(Path(path))
+            for dependency in dependencies for path in dependency.get("sourcePaths", [])}
         if clip:
             item["previewClip"] = clip.relative_to(workspace.workspace_root).as_posix()
             item["previewClipSha256"] = sha256_file(clip)

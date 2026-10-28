@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 4,
+  "language": "vi",
+  "title": "CTA / Radial Glow / Lucide Pointer / SFX",
+  "audioSrc": "",
+  "durationSeconds": 6,
+  "theme": "dark-grid",
+  "captions": [
+    {
+      "text": "Hãy theo dõi Hãy Cùng Bắt Đầu AI",
+      "startMs": 300,
+      "endMs": 2800,
+      "tokens": [
+        {
+          "text": "Hãy",
+          "startMs": 300,
+          "endMs": 600
+        },
+        {
+          "text": "theo",
+          "startMs": 600,
+          "endMs": 900
+        },
+        {
+          "text": "dõi",
+          "startMs": 900,
+          "endMs": 1200
+        },
+        {
+          "text": "Hãy",
+          "startMs": 1200,
+          "endMs": 1450
+        },
+        {
+          "text": "Cùng",
+          "startMs": 1450,
+          "endMs": 1700
+        },
+        {
+          "text": "Bắt",
+          "startMs": 1700,
+          "endMs": 1950
+        },
+        {
+          "text": "Đầu",
+          "startMs": 1950,
+          "endMs": 2200
+        },
+        {
+          "text": "AI",
+          "startMs": 2200,
+          "endMs": 2800
+        }
+      ]
+    },
+    {
+      "text": "và tương tác cùng kênh để chọn chủ đề tiếp theo",
+      "startMs": 2850,
+      "endMs": 5800,
+      "tokens": [
+        {
+          "text": "và",
+          "startMs": 2850,
+          "endMs": 3100
+        },
+        {
+          "text": "tương",
+          "startMs": 3100,
+          "endMs": 3400
+        },
+        {
+          "text": "tác",
+          "startMs": 3400,
+          "endMs": 3700
+        },
+        {
+          "text": "cùng",
+          "startMs": 3700,
+          "endMs": 3900
+        },
+        {
+          "text": "kênh",
+          "startMs": 3900,
+          "endMs": 4200
+        },
+        {
+          "text": "để",
+          "startMs": 4200,
+          "endMs": 4400
+        },
+        {
+          "text": "chọn",
+          "startMs": 4400,
+          "endMs": 4650
+        },
+        {
+          "text": "chủ",
+          "startMs": 4650,
+          "endMs": 4900
+        },
+        {
+          "text": "đề",
+          "startMs": 4900,
+          "endMs": 5200
+        },
+        {
+          "text": "tiếp",
+          "startMs": 5200,
+          "endMs": 5450
+        },
+        {
+          "text": "theo",
+          "startMs": 5450,
+          "endMs": 5800
+        }
+      ]
+    }
+  ],
+  "scenes": [
+    {
+      "id": "cta",
+      "role": "cta",
+      "layout": "custom",
+      "component": "channel-cta-strip",
+      "componentId": "channel-cta-strip",
+      "componentVersion": "1.0.0",
+      "title": "Cùng khám phá ý tưởng AI tiếp theo",
+      "body": "",
+      "startMs": 0,
+      "endMs": 6000,
+      "absoluteStartFrame": 0,
+      "componentProps": {
+        "channelLabel": "HCDB AI",
+        "locale": "vi",
+        "likeLabel": "Thích",
+        "likedLabel": "Đã thích",
+        "subscribeLabel": "Đăng ký",
+        "subscribedLabel": "Đã đăng ký"
+      }
+    }
+  ],
+  "safeArea": {
+    "top": 88,
+    "right": 162,
+    "bottom": 260,
+    "left": 162
+  },
+  "backgroundId": "radial-glow",
+  "backgroundLoopSeconds": 8
+}

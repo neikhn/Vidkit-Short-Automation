@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 4,
+  "language": "en",
+  "title": "English CTA",
+  "audioSrc": "",
+  "durationSeconds": 6,
+  "theme": "light-editorial",
+  "captions": [
+    {"text": "Follow AI Lens", "startMs": 300, "endMs": 2300,
+      "tokens": [{"text": "Follow", "startMs": 300, "endMs": 900}, {"text": "AI", "startMs": 900, "endMs": 1500},
+        {"text": "Lens", "startMs": 1500, "endMs": 2300}]},
+    {"text": "and join the conversation about what comes next", "startMs": 2350, "endMs": 5800,
+      "tokens": [{"text": "and", "startMs": 2350, "endMs": 2650}, {"text": "join", "startMs": 2650, "endMs": 2950},
+        {"text": "the", "startMs": 2950, "endMs": 3200}, {"text": "conversation", "startMs": 3200, "endMs": 3900},
+        {"text": "about", "startMs": 3900, "endMs": 4200}, {"text": "what", "startMs": 4200, "endMs": 4500},
+        {"text": "comes", "startMs": 4500, "endMs": 4900}, {"text": "next", "startMs": 4900, "endMs": 5800}]}
+  ],
+  "scenes": [{
+    "id": "cta", "role": "cta", "layout": "custom", "component": "channel-cta-strip",
+    "componentId": "channel-cta-strip", "componentVersion": "1.0.0",
+    "title": "More useful AI stories ahead", "body": "", "startMs": 0, "endMs": 6000,
+    "absoluteStartFrame": 0,
+    "componentProps": {"channelLabel": "AI Lens", "locale": "en", "likeLabel": "Like",
+      "likedLabel": "Liked", "subscribeLabel": "Subscribe", "subscribedLabel": "Subscribed"}
+  }],
+  "safeArea": {"top": 88, "right": 162, "bottom": 260, "left": 162}
+}

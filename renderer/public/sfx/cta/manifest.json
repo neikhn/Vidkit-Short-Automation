@@ -1,0 +1,47 @@
+{
+  "provider": "ElevenLabs",
+  "model": "eleven_text_to_sound_v2",
+  "usageBasis": "Generated using the project ElevenLabs account; usage subject to its plan and terms.",
+  "source": "https://elevenlabs.io/docs/api-reference/text-to-sound-effects/convert",
+  "sounds": {
+    "like": {
+      "status": "succeeded",
+      "provider": "ElevenLabs",
+      "model": "eleven_text_to_sound_v2",
+      "prompt": "One single soft tactile computer mouse click, a crisp dry tick with a tiny low pop. Immediate attack at the beginning, then silence. Minimal clean interface sound. No repeated clicks, no speech, no music, no ambience.",
+      "durationSeconds": 0.5,
+      "promptInfluence": 0.8,
+      "createdAt": "2026-10-09T06:38:58.440272+00:00",
+      "originalSha256": "84eb2661ad5e1d760a3be54f14bc92ac911a80f806a066e00c1daedf651f0ac8",
+      "file": "like.wav",
+      "sha256": "b0239cb711e4a13805a59994863409377a6dbb19965eee93504592bd12dde182",
+      "peakDbfs": -6
+    },
+    "subscribe": {
+      "status": "succeeded",
+      "provider": "ElevenLabs",
+      "model": "eleven_text_to_sound_v2",
+      "prompt": "One single polished interface confirmation sound: a crisp button click followed immediately by a short warm ascending two-note pop. Clean, restrained, satisfying. Immediate onset, short decay. No speech, no music, no ambience.",
+      "durationSeconds": 0.7,
+      "promptInfluence": 0.8,
+      "createdAt": "2026-10-09T06:39:00.244883+00:00",
+      "originalSha256": "2b1c85669d7a35154d4d33af33ace5f6ba41dec09290366d43fa2456e2740990",
+      "file": "subscribe.wav",
+      "sha256": "81753ebd5e8348fff4021c54dacd1bc56de5dfbe1b40252e3e39e78f2aa0d9bd",
+      "peakDbfs": -6
+    },
+    "bell": {
+      "status": "succeeded",
+      "provider": "ElevenLabs",
+      "model": "eleven_text_to_sound_v2",
+      "prompt": "One single gentle notification bell ding with a rounded bright attack and a soft short shimmering decay. Modern clean app notification, restrained and pleasant. Immediate onset. No repeated bells, no speech, no music, no ambience.",
+      "durationSeconds": 1.0,
+      "promptInfluence": 0.8,
+      "createdAt": "2026-10-09T06:39:02.004457+00:00",
+      "originalSha256": "b100334d86f0c545e322e0548d136db50ed29307749c805a5146d52521690eb7",
+      "file": "bell.wav",
+      "sha256": "e30b7c90c4f5ebcd0dfcbe51ac6916c736bffa462ce44be650b16af4c5bb9804",
+      "peakDbfs": -6
+    }
+  }
+}

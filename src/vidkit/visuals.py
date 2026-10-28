@@ -17,7 +17,7 @@ IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
 def _package_root(workspace: Workspace, job_id: str, language: str) -> Path:
-    return workspace.job_dir(job_id, language) / "visuals"
+    return workspace.area(job_id, language, "visuals")
 
 
 def entries(workspace: Workspace, job_id: str, language: str) -> list[dict[str, Any]]:
@@ -83,7 +83,8 @@ def add(workspace: Workspace, job_id: str, language: str, source: Path) -> dict[
 
 def preview(workspace: Workspace, job_id: str, language: str, visual_id: str) -> dict[str, str]:
     from .render import remotion_command
-    item = next((entry for entry in entries(workspace, job_id, language) if entry["id"] == visual_id), None)
+    item = max((entry for entry in entries(workspace, job_id, language) if entry["id"] == visual_id),
+               key=lambda entry: tuple(int(part) for part in entry["version"].split(".")), default=None)
     if item is None:
         raise KeyError(f"Unknown visual: {visual_id}")
     package = _package_root(workspace, job_id, language) / item["package"]
@@ -119,7 +120,15 @@ def render_entry(workspace: Workspace, job_id: str, language: str,
         candidates = [*entries(workspace, job_id, language), *library.entries(workspace)]
     else:
         candidates = supplied_entries
-    items = [item for item in candidates if item["id"] in selected and item.get("entrypoint")]
+    items = [item for item in candidates if item["id"] in selected and item.get("entrypoint")
+             and item.get("kind") == "component"]
+    background_lock = timeline.get("backgroundLock") or {}
+    background = next((item for item in reversed(candidates) if item.get("kind") == "background"
+                       and item["id"] == timeline.get("backgroundId")
+                       and (not background_lock or (item.get("version") == background_lock.get("version")
+                                                    and item.get("sha256") == background_lock.get("sha256")))), None)
+    if timeline.get("backgroundId") and (not background or not background.get("entrypoint")):
+        raise ValueError(f"Background source is unavailable: {timeline['backgroundId']}")
     generated = workspace.project_root / "renderer/src/.vidkit-generated" / job_id / language
     generated.mkdir(parents=True, exist_ok=True)
     imports = []
@@ -130,6 +139,31 @@ def render_entry(workspace: Workspace, job_id: str, language: str,
         relative = Path(os.path.relpath(absolute, generated)).as_posix()
         imports.append(f"import Visual{index} from {json.dumps(relative)};")
         registry.append(f"{json.dumps(item['id'])}: Visual{index}")
+    background_registry = "{}"
+    layer_entries = []
+    if timeline.get("background") is not None:
+        from .backgrounds import resolve
+        layers = timeline.get("backgroundLayers") or resolve(timeline["background"], candidates, require_motion=False)["backgroundLayers"]
+        for layer in layers:
+            item = next((item for item in reversed(candidates) if item.get("id") == layer["id"]
+                         and item.get("kind") == layer["kind"] and item.get("version") == layer["version"]
+                         and item.get("sha256") == layer["sha256"]), None)
+            if not item or not item.get("entrypointAbsolute"):
+                raise ValueError(f"Locked background source is unavailable: {layer['id']}")
+            layer_entries.append(item)
+    if background:
+        absolute = Path(background["entrypointAbsolute"]) if background.get("entrypointAbsolute") else (
+            workspace.project_root / "renderer/library" / background["codePath"] / background["entrypoint"])
+        relative = Path(os.path.relpath(absolute, generated)).as_posix()
+        imports.append(f"import SelectedBackground from {json.dumps(relative)};")
+        background_registry = "{" + json.dumps(background["id"]) + ": SelectedBackground}"
+    if layer_entries:
+        registry_items = []
+        for index, item in enumerate(layer_entries):
+            relative = Path(os.path.relpath(item["entrypointAbsolute"], generated)).as_posix()
+            imports.append(f"import BackgroundLayer{index} from {json.dumps(relative)};")
+            registry_items.append(f"{json.dumps(item['id'])}: BackgroundLayer{index}")
+        background_registry = "{" + ", ".join(registry_items) + "}"
     source = "\n".join([
         "import React from 'react';",
         "import {registerRoot, Composition} from 'remotion';",
@@ -139,7 +173,8 @@ def render_entry(workspace: Workspace, job_id: str, language: str,
         "import {defaultProps, calculateMetadata} from '../../../Root';",
         *imports,
         f"const registry = {{{', '.join(registry)}}};",
-        "const Video: React.FC<VidkitShortProps> = (props) => <VidkitShort {...props} visualRegistry={registry} />;",
+        f"const backgrounds = {background_registry};",
+        "const Video: React.FC<VidkitShortProps> = (props) => <VidkitShort {...props} visualRegistry={registry} backgroundRegistry={backgrounds} />;",
         "const Root = () => <Composition id=\"VidkitShort\" component={Video} width={1080} height={1920} fps={30} durationInFrames={300} defaultProps={defaultProps} calculateMetadata={calculateMetadata} />;",
         "registerRoot(Root);",
     ])

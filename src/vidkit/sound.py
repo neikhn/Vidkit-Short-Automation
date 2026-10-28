@@ -64,7 +64,8 @@ def register_asset(workspace: Workspace, job_id: str, source: Path, asset_id: st
         raise ValueError("Sound asset needs description, source and usageBasis")
     info = inspect_audio(source)
     checksum = sha256_file(source)
-    destination = workspace.job_root(job_id) / "audio-assets" / kind / (checksum + info["extension"])
+    sounds = "shared/sounds" if workspace.layout_version(job_id) >= 2 else "audio-assets"
+    destination = workspace.job_root(job_id) / sounds / kind / (checksum + info["extension"])
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and sha256_file(destination) != checksum:
         raise ValueError("Audio cache checksum mismatch")
@@ -189,7 +190,7 @@ def generate(workspace: Workspace, job_id: str, language: str, kind: str,
             return existing
         return register_asset(workspace, job_id, workspace.resolve_path(existing["path"]),
                               spec.get("assetId", spec["id"]), kind, existing)
-    request_dir = workspace.job_dir(job_id, language) / "audio" / "sound-plan" / "requests"
+    request_dir = workspace.area(job_id, language, "audio") / "sound-plan" / "requests"
     request_dir.mkdir(parents=True, exist_ok=True)
     previous = [json.loads(path.read_text(encoding="utf-8")) for path in request_dir.glob("*.json")]
     if not new_take:
@@ -237,7 +238,7 @@ def _write_record(path: Path, record: dict[str, Any]) -> None:
 def recover_request(workspace: Workspace, job_id: str, language: str, request_id: str, source: Path) -> dict[str, Any]:
     if not re.fullmatch(r"[a-f0-9]{64}(?:-[a-f0-9]{8})?", request_id):
         raise ValueError("Invalid request id")
-    path = workspace.job_dir(job_id, language) / "audio" / "sound-plan" / "requests" / (request_id + ".json")
+    path = workspace.area(job_id, language, "audio") / "sound-plan" / "requests" / (request_id + ".json")
     record = json.loads(path.read_text(encoding="utf-8"))
     if record["state"] == "completed":
         if sha256_file(source) != record["sha256"]:

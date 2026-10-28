@@ -1,11 +1,14 @@
 import React from 'react';
+import {BackgroundStack, type BackgroundLayer, type BackgroundRegistry} from './BackgroundStack';
 import {SoundTracks, type SoundTrack} from './SoundTracks';
 import {Audio} from '@remotion/media';
 import {AnimatedCounter, AnimatedText, GradientTransition} from 'remotion-bits';
 import libraryManifest from '../library/manifest.json';
 import {JevVisual} from './JevVisuals';
+import {VisualGroup} from './VisualGroup';
 import {
   AbsoluteFill,
+  Freeze,
   continueRender,
   delayRender,
   Img,
@@ -46,6 +49,7 @@ export type Scene = {
   continuityGroup?: string;
   continuityStartFrame?: number;
   componentVersion?: string;
+  visualAlignment?: 'centered';
   claimIds?: string[];
   motion?: {cues?: Array<{atMs: number; type?: string}>; zoomTo?: number; mode?: string};
 };
@@ -60,6 +64,8 @@ export type VidkitShortProps = {
   language: string;
   title: string;
   audioSrc: string;
+  audioStartMs?: number;
+  leadInMs?: number;
   soundTracks?: SoundTrack[];
   audioSegments?: Array<{startMs: number; endMs: number; sourceStartMs: number}>;
   durationSeconds: number;
@@ -68,6 +74,11 @@ export type VidkitShortProps = {
   safeArea?: SafeArea;
   theme?: string;
   themeData?: Theme;
+  backgroundId?: string;
+  background?: {patternId: string; effectIds?: string[]};
+  backgroundLayers?: BackgroundLayer[];
+  backgroundLoopSeconds?: number;
+  backgroundRegistry?: BackgroundRegistry;
   sfx?: Array<{type: 'whoosh'; atMs: number}>;
   visualRegistry?: Record<string, React.ComponentType<{scene: Scene; theme: Theme}>>;
 };
@@ -297,6 +308,7 @@ const FocusImage: React.FC<{scene: Scene; theme: Theme; height?: number}> = ({sc
 const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
+  const centerVisuals = scene.visualAlignment === 'centered';
   const reveal = revealStyle(frame, fps, theme.motionIntensity);
   const titleStyle: React.CSSProperties = {fontSize: theme.typography.headlineSize, lineHeight: 1.1, fontWeight: 900, color: theme.text,
     letterSpacing: -1.6, maxWidth: 940, overflowWrap: 'break-word'};
@@ -311,6 +323,7 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
   if (scene.motion?.mode?.startsWith('jev-')) return <JevVisual scene={scene} theme={theme} />;
   if (layout === 'brand-hook') {
     return <AbsoluteFill style={{padding: '250px 70px 410px', justifyContent: 'center', ...reveal}}>
+      <VisualGroup enabled={centerVisuals} maxWidth={scene.asset?.src ? 300 : 520}>
       {scene.asset?.src ? <div style={{width: 300, height: 300, marginBottom: 55, borderRadius: 48, overflow: 'hidden', background: theme.surface,
         display: 'grid', placeItems: 'center'}}><Img src={staticFile(scene.asset.src)} style={{maxWidth: 270, maxHeight: 270, objectFit: 'contain'}} /></div>
         : <div style={{position: 'relative', width: 520, height: 330, marginBottom: 65, display: 'grid', placeItems: 'center'}}>
@@ -321,6 +334,7 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
             placeItems: 'center', color: theme.accent, fontSize: 70, fontWeight: 900,
             boxShadow: `0 0 85px ${theme.accent}55`}}>✦</div>
         </div>}
+      </VisualGroup>
       <AnimatedText transition={{split: 'word', y: [24, 0], opacity: [0, 1], splitStagger: 3, duration: 18}}
         style={{...titleStyle, fontSize: 86}}>{nfc(scene.title)}</AnimatedText>
       {scene.body ? <div style={{...bodyStyle, marginTop: 32}}>{nfc(scene.body)}</div> : null}
@@ -329,21 +343,21 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
   if (layout === 'screenshot-focus') {
     return <AbsoluteFill style={{padding: '145px 66px 390px', ...reveal}}>
       <div style={titleStyle}>{nfc(scene.title)}</div>
-      <div style={{marginTop: 45}}><FocusImage scene={scene} theme={theme} height={890} /></div>
+      <div style={{marginTop: 45}}><VisualGroup enabled={centerVisuals} maxWidth={948}><FocusImage scene={scene} theme={theme} height={890} /></VisualGroup></div>
     </AbsoluteFill>;
   }
   if (layout === 'api-response') {
     const fields = scene.body.split(/[,\n]/).map((part) => part.trim()).filter(Boolean).slice(0, 5);
     return <AbsoluteFill style={{padding: '210px 75px 410px', justifyContent: 'center', ...reveal}}>
       <div style={titleStyle}>{nfc(scene.title)}</div>
-      <div style={{marginTop: 55, minHeight: 600, borderRadius: 34, background: theme.surface, padding: '65px 48px', border: `2px solid ${theme.accent}55`,
+      <VisualGroup enabled={centerVisuals} maxWidth={840}><div style={{marginTop: 55, minHeight: 600, borderRadius: 34, background: theme.surface, padding: '65px 48px', border: `2px solid ${theme.accent}55`,
         boxShadow: `0 24px 85px ${theme.accent}19`}}>
         {fields.map((field, index) => <div key={index} style={{fontSize: 39, lineHeight: 1.45, fontWeight: 700, color: theme.text,
           opacity: interpolate(frame, [revealAt(index, fields.length), revealAt(index, fields.length) + 7], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}),
           padding: '29px 0', borderBottom: index < fields.length - 1 ? `1px solid ${theme.muted}44` : 'none'}}>
           <span style={{color: theme.accent, marginRight: 20}}>{'{ }'}</span>{nfc(field)}
         </div>)}
-      </div>
+      </div></VisualGroup>
     </AbsoluteFill>;
   }
   if (layout === 'diagram-flow') {
@@ -351,6 +365,7 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
     if (scene.motion?.mode === 'parallel') {
       return <AbsoluteFill style={{padding: '195px 65px 390px', justifyContent: 'center', ...reveal}}>
         <div style={titleStyle}>{nfc(scene.title)}</div>
+        <VisualGroup enabled={centerVisuals} maxWidth={840}><>
         <div style={{marginTop: 50, padding: '28px 32px', borderRadius: 24, border: `2px solid ${theme.accent}`, color: theme.text,
           background: theme.surface, fontSize: 37, fontWeight: 800, textAlign: 'center'}}>ONE EMAIL</div>
         <div style={{height: 68, width: 3, background: theme.accent, margin: '0 auto'}} />
@@ -361,11 +376,13 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
             borderLeft: `7px solid ${theme.accent}`}}>{nfc(step)}</div>
         </div>)}</div>
         <div style={{fontSize: 26, color: theme.muted, marginTop: 28, textAlign: 'center'}}>PARALLEL PASS</div>
+        </></VisualGroup>
       </AbsoluteFill>;
     }
     if (scene.motion?.mode === 'token-chain') {
       return <AbsoluteFill style={{padding: '235px 70px 390px', justifyContent: 'center', ...reveal}}>
         <div style={titleStyle}>{nfc(scene.title)}</div>
+        <VisualGroup enabled={centerVisuals} maxWidth={840}><>
         <div style={{marginTop: 90, display: 'flex', alignItems: 'center', gap: 12}}>{steps.map((step, index) => <React.Fragment key={index}>
           {index > 0 ? <div style={{fontSize: 40, color: theme.accent}}>→</div> : null}
           <div style={{minWidth: 0, flex: 1, padding: '30px 9px', borderRadius: 19, background: theme.surface, color: theme.text,
@@ -373,40 +390,43 @@ const V3Scene: React.FC<{scene: Scene; theme: Theme}> = ({scene, theme}) => {
               [revealAt(index, steps.length), revealAt(index, steps.length) + 7], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'})}}>{nfc(step)}</div>
         </React.Fragment>)}</div>
         <div style={{marginTop: 55, color: theme.muted, fontSize: 30}}>Each token waits on the previous one.</div>
+        </></VisualGroup>
       </AbsoluteFill>;
     }
     return <AbsoluteFill style={{padding: '180px 70px 390px', justifyContent: 'center', ...reveal}}>
       <div style={titleStyle}>{nfc(scene.title)}</div>
-      <div style={{marginTop: 60, display: 'grid', gap: 34}}>{steps.map((step, index) =>
+      <VisualGroup enabled={centerVisuals} maxWidth={840}><div style={{marginTop: 60, display: 'grid', gap: 34}}>{steps.map((step, index) =>
         <div key={index} style={{display: 'flex', alignItems: 'center', gap: 30,
           opacity: interpolate(frame, [revealAt(index, steps.length), revealAt(index, steps.length) + 7], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'})}}>
           <div style={{width: 68, height: 68, borderRadius: 20, background: theme.accent, color: theme.background,
             display: 'grid', placeItems: 'center', fontSize: 31, fontWeight: 900}}>{index + 1}</div>
           <div style={{background: theme.surface, color: theme.text, borderRadius: 24, padding: '34px 34px', flex: 1, fontSize: 41, fontWeight: 700}}>{nfc(step)}</div>
-        </div>)}</div>
+        </div>)}</div></VisualGroup>
     </AbsoluteFill>;
   }
   if (layout === 'metric-breakdown') {
     const metric = scene.title.match(/[\d,.]+\s?(?:%|ms|s|tokens|million|billion)?/i)?.[0];
     const range = /\d\s*[–-]\s*\d/.test(scene.title) || scene.title.includes('$');
     return <AbsoluteFill style={{padding: '220px 76px 405px', justifyContent: 'center', ...reveal}}>
-      {range ? <div style={{fontSize: 112, fontWeight: 900, color: theme.accent, lineHeight: 1.1}}>{nfc(scene.title)}</div> : metric ? <div style={{fontSize: 132, fontWeight: 900, color: theme.accent, lineHeight: 1}}>
+      <VisualGroup enabled={centerVisuals} maxWidth={840}>{range ? <div style={{fontSize: 112, fontWeight: 900, color: theme.accent, lineHeight: 1.1,
+        textAlign: centerVisuals ? 'center' : undefined}}>{nfc(scene.title)}</div> : metric ? <div style={{fontSize: 132, fontWeight: 900, color: theme.accent, lineHeight: 1,
+        textAlign: centerVisuals ? 'center' : undefined}}>
         <AnimatedCounter transition={{values: [0, Number.parseFloat(metric.replace(/,/g, ''))], duration: 34}}
           toFixed={metric.includes('.') ? metric.split('.')[1].match(/^\d+/)?.[0].length ?? 0 : 0}
           postfix={metric.match(/[^\d,.].*$/)?.[0] ?? ''} />
-      </div> : null}
+      </div> : null}</VisualGroup>
       {!range && !metric ? <div style={{...titleStyle, marginTop: 35}}>{nfc(scene.title)}</div> : null}
       {scene.body ? <div style={{...bodyStyle, marginTop: 30}}>{nfc(scene.body)}</div> : null}
-      {scene.asset?.src ? <div style={{marginTop: 45}}><FocusImage scene={scene} theme={theme} height={500} /></div> : null}
+      {scene.asset?.src ? <div style={{marginTop: 45}}><VisualGroup enabled={centerVisuals} maxWidth={948}><FocusImage scene={scene} theme={theme} height={500} /></VisualGroup></div> : null}
     </AbsoluteFill>;
   }
   return <AbsoluteFill style={{padding: '240px 78px 420px', justifyContent: 'center', ...reveal}}>
-    <div style={{padding: '70px 62px', background: theme.surface, borderRadius: 42, boxShadow: '0 28px 90px #0005',
+    <VisualGroup enabled={centerVisuals} maxWidth={840}><div style={{padding: '70px 62px', background: theme.surface, borderRadius: 42, boxShadow: '0 28px 90px #0005',
       border: `2px solid ${theme.accent}44`}}>
       <div style={{height: 9, width: 125, borderRadius: 9, background: theme.accent, marginBottom: 42}} />
       <div style={titleStyle}>{nfc(scene.title)}</div>
       {scene.body ? <div style={{...bodyStyle, marginTop: 32}}>{nfc(scene.body)}</div> : null}
-    </div>
+    </div></VisualGroup>
   </AbsoluteFill>;
 };
 
@@ -481,9 +501,20 @@ const Captions: React.FC<{captions: Caption[]; safeArea: SafeArea; theme: Theme;
 
 export const VidkitShort: React.FC<VidkitShortProps> = (props) => {
   const {fps} = useVideoConfig();
+  const absoluteFrame = useCurrentFrame();
+  const leadInFrames = Math.round((props.leadInMs ?? 0) * fps / 1000);
+  const openingScene = props.scenes[0];
+  const OpeningVisual = props.visualRegistry?.[openingScene?.componentId ?? openingScene?.component ?? ""];
   const safeArea = props.safeArea ?? defaultSafeArea;
   const isV3 = props.schemaVersion >= 3;
   const theme = props.themeData ?? themes[props.theme ?? 'dark-grid'] ?? themes['dark-grid'];
+  const SelectedBackground = props.backgroundId ? props.backgroundRegistry?.[props.backgroundId] : null;
+  if (props.backgroundId && !SelectedBackground) {
+    throw new Error(`Background source is unavailable: ${props.backgroundId}`);
+  }
+  const backgroundPeriod = Math.max(1, Math.round((props.backgroundLoopSeconds ?? 8) * fps));
+  if (props.background && !props.backgroundLayers?.length) throw new Error('Compile the layered background before rendering');
+  const hasBackground = Boolean(SelectedBackground || props.backgroundLayers?.length);
   const [fontHandle] = React.useState(() => delayRender('Loading bundled Noto Sans fonts'));
   React.useEffect(() => {
     let finished = false;
@@ -506,7 +537,10 @@ export const VidkitShort: React.FC<VidkitShortProps> = (props) => {
   return (
     <AbsoluteFill style={{background: isV3 ? theme.background : 'linear-gradient(145deg, #f8fafc 0%, #edf3f9 65%, #e7eef8 100%)',
       color: isV3 ? theme.text : '#10233f', fontFamily: 'Noto Sans, sans-serif', overflow: 'hidden'}}>
-      {isV3 ? <GradientTransition
+      {SelectedBackground ? <SelectedBackground theme={theme} phase={(absoluteFrame % backgroundPeriod) / backgroundPeriod} /> : null}
+      {props.backgroundLayers?.length ? <BackgroundStack layers={props.backgroundLayers} registry={props.backgroundRegistry}
+        theme={theme} frame={absoluteFrame} fps={fps} /> : null}
+      {isV3 && !hasBackground ? <GradientTransition
         gradient={[
           `linear-gradient(145deg, ${theme.background}, ${theme.surface})`,
           `linear-gradient(190deg, ${theme.surface}, ${theme.background})`,
@@ -514,13 +548,14 @@ export const VidkitShort: React.FC<VidkitShortProps> = (props) => {
         frames={[0, Math.max(1, props.durationSeconds * fps)]}
         style={{position: 'absolute', inset: 0, opacity: .6}}
       /> : null}
-      <AbsoluteFill style={isV3 ? {backgroundImage: theme.pattern, backgroundSize: '76px 76px', opacity: .75} :
+      {!hasBackground ? <AbsoluteFill style={isV3 ? {backgroundImage: theme.pattern, backgroundSize: '76px 76px', opacity: .75} :
         {opacity: 0.45, backgroundImage: 'radial-gradient(circle at 12% 10%, rgba(22,119,255,.12), transparent 28%), radial-gradient(circle at 90% 60%, rgba(80,145,255,.10), transparent 32%)'}} />
+        : null}
       {props.audioSrc ? props.audioSegments ? props.audioSegments.map((segment, index) =>
         <Sequence key={`audio-${index}`} from={Math.round(segment.startMs * fps / 1000)}
           durationInFrames={Math.max(1, Math.round((segment.endMs - segment.startMs) * fps / 1000))}>
           <Audio src={staticFile(props.audioSrc)} trimBefore={Math.round(segment.sourceStartMs * fps / 1000)} />
-        </Sequence>) : <Audio src={staticFile(props.audioSrc)} volume={props.soundTracks?.some((track) => (track.src?.includes('jobs/0e00e47bb788/') || track.src?.includes('jobs/e5fb0399b313/')) && track.id.startsWith('editorial-underscore')) ? 0.8 : 1} /> : null}
+        </Sequence>) : <Sequence from={Math.round((props.audioStartMs ?? 0) * fps / 1000)}><Audio src={staticFile(props.audioSrc)} volume={props.soundTracks?.some((track) => (track.src?.includes('jobs/0e00e47bb788/') || track.src?.includes('jobs/e5fb0399b313/')) && (track.id.startsWith('editorial-underscore') || track.id.startsWith('topography-underscore'))) ? 0.8 : 1} /></Sequence> : null}
       {props.soundTracks ? <SoundTracks tracks={props.soundTracks} /> : null}
       {props.sfx?.filter((cue) => cue.type === 'whoosh').map((cue, index) => <Sequence
         key={`sfx-${index}`}
@@ -529,12 +564,24 @@ export const VidkitShort: React.FC<VidkitShortProps> = (props) => {
       >
         <Audio src={staticFile('sfx/whoosh.wav')} volume={.16} />
       </Sequence>)}
-      {props.scenes.map((scene) => {
-        const from = Math.max(0, Math.floor((scene.startMs / 1000) * fps));
-        const duration = Math.max(1, Math.ceil(((scene.endMs - scene.startMs) / 1000) * fps));
+      {leadInFrames > 0 && openingScene ? <Sequence from={0} durationInFrames={leadInFrames} name="Opening pause">
+        <Freeze frame={leadInFrames}>
+          {OpeningVisual ? <OpeningVisual scene={{...openingScene, startMs: props.leadInMs ?? 0}} theme={theme} />
+            : <SceneView scene={openingScene} language={props.language} theme={theme} isV3={isV3} />}
+        </Freeze>
+      </Sequence> : null}
+      {props.scenes.map((scene, index) => {
+        const from = index === 0 && leadInFrames > 0 ? leadInFrames : Math.max(0, Math.floor((scene.startMs / 1000) * fps));
+        const end = index === props.scenes.length - 1
+          ? Math.ceil(props.durationSeconds * fps)
+          : Math.floor((scene.endMs / 1000) * fps);
+        const duration = Math.max(1, end - from);
+        const renderedScene = index === 0 && leadInFrames > 0 ? {...scene, startMs: props.leadInMs ?? 0} : scene;
         const Custom = props.visualRegistry?.[scene.componentId ?? scene.component ?? ''];
         return <Sequence key={scene.id} from={from} durationInFrames={duration} premountFor={Math.min(fps, from)}>
-          {Custom ? <Custom scene={scene} theme={theme} /> : <SceneView scene={scene} language={props.language} theme={theme} isV3={isV3} />}
+          {index === 0 && leadInFrames > 0 ? <Freeze frame={Math.max(leadInFrames, absoluteFrame - from)}>
+            {Custom ? <Custom scene={renderedScene} theme={theme} /> : <SceneView scene={renderedScene} language={props.language} theme={theme} isV3={isV3} />}
+          </Freeze> : Custom ? <Custom scene={scene} theme={theme} /> : <SceneView scene={scene} language={props.language} theme={theme} isV3={isV3} />}
         </Sequence>;
       })}
       <Captions captions={props.captions} safeArea={safeArea} theme={theme} isV3={isV3} />

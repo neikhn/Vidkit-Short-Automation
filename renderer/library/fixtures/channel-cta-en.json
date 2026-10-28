@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 4,
+  "language": "en",
+  "title": "English CTA",
+  "audioSrc": "",
+  "durationSeconds": 4.8,
+  "theme": "dark-grid",
+  "captions": [
+    {"text": "Like the video", "startMs": 700, "endMs": 2150,
+      "tokens": [{"text": "Like", "startMs": 700, "endMs": 1200}, {"text": "the", "startMs": 1200, "endMs": 1600}, {"text": "video", "startMs": 1600, "endMs": 2150}]},
+    {"text": "Subscribe to AI Lens", "startMs": 2200, "endMs": 4700,
+      "tokens": [{"text": "Subscribe", "startMs": 2200, "endMs": 3000}, {"text": "to", "startMs": 3000, "endMs": 3500}, {"text": "AI", "startMs": 3500, "endMs": 4000}, {"text": "Lens", "startMs": 4000, "endMs": 4700}]}
+  ],
+  "scenes": [{
+    "id": "cta", "role": "cta", "layout": "custom", "component": "channel-cta",
+    "componentId": "channel-cta", "title": "Make sense of AI, one idea at a time",
+    "body": "Clear examples, grounded in sources", "startMs": 0, "endMs": 4800,
+    "absoluteStartFrame": 0,
+    "componentProps": {"channelLabel": "AI Lens", "locale": "en", "likeLabel": "Like",
+      "likedLabel": "Liked", "subscribeLabel": "Subscribe", "subscribedLabel": "Subscribed"},
+    "events": [{"id": "like-click", "entityId": "like", "atFrame": 48, "endFrame": 56},
+      {"id": "subscribe-click", "entityId": "subscribe", "atFrame": 83, "endFrame": 91}]
+  }],
+  "safeArea": {"top": 88, "right": 162, "bottom": 260, "left": 162}
+}

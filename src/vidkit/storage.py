@@ -16,6 +16,18 @@ from .models import ArtifactKind, ArtifactStatus, Mode
 
 STAGE_ORDER = [kind.value for kind in ArtifactKind]
 SHARED_KINDS = {ArtifactKind.SOURCE, ArtifactKind.ASSET_MANIFEST, ArtifactKind.SOUND_ASSETS}
+V2_DIRECTORIES = {
+    ArtifactKind.SOURCE: "shared/sources", ArtifactKind.ASSET_MANIFEST: "shared/assets",
+    ArtifactKind.SOUND_ASSETS: "shared/sounds", ArtifactKind.SCRIPT: "writing/scripts",
+    ArtifactKind.BRIEF: "writing/briefs", ArtifactKind.AUDIO: "audio/narration",
+    ArtifactKind.TRANSCRIPT: "audio/transcripts", ArtifactKind.SOUND_PLAN: "audio/sound-plan",
+    ArtifactKind.AUDIO_MIX: "audio/mix", ArtifactKind.STORYBOARD: "edit/storyboard",
+    ArtifactKind.TIMELINE: "edit/storyboard", ArtifactKind.CAPTION_PLAN: "edit/subtitles",
+    ArtifactKind.SUBTITLE_SRT: "edit/subtitles", ArtifactKind.SUBTITLE_VTT: "edit/subtitles",
+    ArtifactKind.PREVIEW: "previews", ArtifactKind.QA_REPORT: "review/qa",
+    ArtifactKind.APPROVAL: "review/approvals", ArtifactKind.RENDER: "exports",
+    ArtifactKind.PUBLICATION: "exports",
+}
 KIND_DIRECTORIES = {
     ArtifactKind.SOURCE: "sources",
     ArtifactKind.ASSET_MANIFEST: "assets",
@@ -67,6 +79,8 @@ class Workspace:
         self.db_path = self.workspace_root / "workspace.sqlite3"
         self.videos_root = self.workspace_root / "videos"
         self.cache_root = self.workspace_root / "cache"
+        self.objects_root = self.workspace_root / "objects" / "sha256"
+        self.workbench_root = self.workspace_root / "workbench"
         self.legacy_root = self.project_root / ".vidkit"
 
     def initialize(self) -> None:
@@ -108,12 +122,15 @@ class Workspace:
                   key TEXT PRIMARY KEY,
                   value TEXT NOT NULL
                 );
-                INSERT OR REPLACE INTO workspace_meta(key, value) VALUES ('schema_version', '3');
+                INSERT OR REPLACE INTO workspace_meta(key, value) VALUES ('schema_version', '4');
                 """
             )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
             if "workflow_version" not in columns:
                 conn.execute("ALTER TABLE jobs ADD COLUMN workflow_version INTEGER NOT NULL DEFAULT 2")
+            if "storage_layout_version" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN storage_layout_version INTEGER NOT NULL DEFAULT 1")
+            conn.execute("CREATE TABLE IF NOT EXISTS path_aliases (old_path TEXT PRIMARY KEY, new_path TEXT NOT NULL)")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -144,7 +161,7 @@ class Workspace:
         folder_name = self._folder_name(job_id, topic, now)
         with self.connect() as conn:
             conn.execute(
-                "INSERT INTO jobs (id, topic, source_url, mode, languages_json, status, folder_name, created_at, updated_at, workflow_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO jobs (id, topic, source_url, mode, languages_json, status, folder_name, created_at, updated_at, workflow_version, storage_layout_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)",
                 (
                     job_id,
                     topic,
@@ -216,13 +233,49 @@ class Workspace:
         return target / filename
 
     def asset_dir(self, job_id: str) -> Path:
-        target = self.job_root(job_id) / "assets" / "files"
+        target = self.job_root(job_id) / ("shared/assets/files" if self.layout_version(job_id) >= 2 else "assets/files")
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def layout_version(self, job_id: str) -> int:
+        return int(self.get_job(job_id)["storage_layout_version"])
+
+    def area(self, job_id: str, language: str | None, name: str) -> Path:
+        root = self.job_dir(job_id, language)
+        if self.layout_version(job_id) >= 2:
+            mapping = {"briefs": "writing/briefs", "scripts": "writing/scripts",
+                       "transcripts": "audio/transcripts", "storyboard": "edit/storyboard",
+                       "subtitles": "edit/subtitles", "visuals": "edit/visuals",
+                       "feedback": "review/feedback", "qa": "review/qa",
+                       "approvals": "review/approvals"}
+            name = mapping.get(name, name)
+        target = root / name
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def checkpoint_dir(self, job_id: str, language: str) -> Path:
+        part = "history/checkpoints" if self.layout_version(job_id) >= 2 else "checkpoints"
+        return self.job_root(job_id) / part / language
+
+    def workdir(self, job_id: str, language: str | None = None) -> Path:
+        target = self.workbench_root / "by-video" / job_id
+        if language:
+            target /= language
         target.mkdir(parents=True, exist_ok=True)
         return target
 
     def resolve_path(self, artifact_or_path: dict[str, Any] | str) -> Path:
         value = artifact_or_path["path"] if isinstance(artifact_or_path, dict) else artifact_or_path
-        return (self.workspace_root / value).resolve()
+        candidate = (self.workspace_root / value).resolve()
+        if not candidate.is_relative_to(self.workspace_root.resolve()):
+            raise ValueError(f"Workspace path escapes root: {value}")
+        with self.connect() as conn:
+            alias = conn.execute("SELECT new_path FROM path_aliases WHERE old_path = ?", (str(value).replace('\\', '/'),)).fetchone()
+        if alias:
+            candidate = (self.workspace_root / alias["new_path"]).resolve()
+            if not candidate.is_relative_to(self.workspace_root.resolve()):
+                raise ValueError(f"Workspace alias escapes root: {value}")
+        return candidate
 
     def latest_artifact(
         self,
@@ -566,6 +619,16 @@ class Workspace:
     ) -> Path:
         job = self.get_job(job_id)
         root = self.videos_root / job["folder_name"]
+        if int(job["storage_layout_version"]) >= 2:
+            if kind in SHARED_KINDS:
+                directory = root / V2_DIRECTORIES[kind]
+            else:
+                if not language:
+                    raise ValueError(f"Language is required for {kind.value}")
+                directory = root / language / V2_DIRECTORIES[kind]
+            if kind in {ArtifactKind.RENDER, ArtifactKind.PUBLICATION, ArtifactKind.PREVIEW}:
+                return directory / f"{slugify(job['topic'])}.{language}.r{revision}{suffix}"
+            return directory / f"{kind.value}.r{revision}{suffix}"
         if kind in {ArtifactKind.RENDER, ArtifactKind.PUBLICATION, ArtifactKind.PREVIEW}:
             lang = language or "shared"
             filename = f"{slugify(job['topic'])}.{lang}.r{revision}{suffix}"
@@ -581,6 +644,16 @@ class Workspace:
     def _ensure_job_tree(self, job_id: str) -> None:
         job = self.get_job(job_id)
         root = self.videos_root / job["folder_name"]
+        if int(job["storage_layout_version"]) >= 2:
+            for shared in ("shared/sources", "shared/assets", "shared/sounds", "history/checkpoints"):
+                (root / shared).mkdir(parents=True, exist_ok=True)
+            for language in job["languages"]:
+                for folder in ("writing/scripts", "writing/briefs", "audio/narration", "audio/transcripts",
+                               "audio/sound-plan", "audio/mix", "edit/storyboard", "edit/subtitles",
+                               "edit/visuals", "review/qa", "review/approvals", "review/feedback",
+                               "previews", "exports"):
+                    (root / language / folder).mkdir(parents=True, exist_ok=True)
+            return
         for shared in ("sources", "assets", "previews", "exports"):
             (root / shared).mkdir(parents=True, exist_ok=True)
         for language in job["languages"]:

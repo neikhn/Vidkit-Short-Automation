@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 4,
+  "language": "en",
+  "title": "Visual centering fixture",
+  "audioSrc": "",
+  "durationSeconds": 16,
+  "theme": "dark-grid",
+  "captions": [
+    {"text": "Centered visual", "startMs": 800, "endMs": 3200, "tokens": [{"text": "Centered", "startMs": 800, "endMs": 1900}, {"text": "visual", "startMs": 1900, "endMs": 3200}]},
+    {"text": "Grouped cards", "startMs": 4800, "endMs": 7200, "tokens": [{"text": "Grouped", "startMs": 4800, "endMs": 5900}, {"text": "cards", "startMs": 5900, "endMs": 7200}]},
+    {"text": "Branching flow", "startMs": 8800, "endMs": 11200, "tokens": [{"text": "Branching", "startMs": 8800, "endMs": 9900}, {"text": "flow", "startMs": 9900, "endMs": 11200}]},
+    {"text": "Sourced chart", "startMs": 12800, "endMs": 15200, "tokens": [{"text": "Sourced", "startMs": 12800, "endMs": 13900}, {"text": "chart", "startMs": 13900, "endMs": 15200}]}
+  ],
+  "scenes": [
+    {"id": "logo", "layout": "brand-hook", "title": "LEFT-ALIGNED TITLE", "body": "Synthetic layout fixture", "asset": {"id": "sample-mark", "src": "fixtures/alignment-mark.svg"}, "visualAlignment": "centered", "startMs": 0, "endMs": 4000},
+    {"id": "cards", "layout": "custom", "componentId": "token-sequence", "title": "LEFT-ALIGNED HEADING", "body": "", "componentProps": {"tokens": ["Input", "Model", "Output"]}, "visualAlignment": "centered", "startMs": 4000, "endMs": 8000},
+    {"id": "diagram", "layout": "custom", "componentId": "branch-flow", "title": "LEFT-ALIGNED HEADING", "body": "", "componentProps": {"sourceNode": "Input", "branches": ["A", "B", "C"]}, "visualAlignment": "centered", "startMs": 8000, "endMs": 12000},
+    {"id": "chart", "layout": "custom", "componentId": "range-log-chart", "title": "LEFT-ALIGNED HEADING", "body": "", "componentProps": {"values": [{"label": "A", "value": 70}, {"label": "B", "value": 500}], "unit": "ms", "source": "Synthetic fixture data", "scale": "linear"}, "visualAlignment": "centered", "startMs": 12000, "endMs": 16000}
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 4,
+  "language": "vi",
+  "title": "CTA end card fixture",
+  "audioSrc": "",
+  "durationSeconds": 3,
+  "captions": [{"text": "Theo dõi kênh và để lại bình luận", "startMs": 0, "endMs": 3000,
+    "tokens": [{"text": "Theo dõi kênh và để lại bình luận", "startMs": 0, "endMs": 3000}]}],
+  "theme": "dark-grid",
+  "scenes": [{
+    "id": "cta",
+    "role": "cta",
+    "layout": "custom",
+    "component": "cta-end-card",
+    "componentId": "cta-end-card",
+    "title": "Bạn muốn xem công cụ AI nào tiếp theo?",
+    "body": "Theo dõi · Bình luận",
+    "startMs": 0,
+    "endMs": 3000
+  }],
+  "safeArea": {"top": 88, "right": 162, "bottom": 260, "left": 162}
+}

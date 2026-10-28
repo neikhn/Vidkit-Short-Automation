@@ -11,6 +11,7 @@ Read the [contract](../vidkit-pipeline/references/handoff-contract.md) and [Elev
 
 ## Workflow
 1. Preserve clean editorial narration. Prepare the expected spoken version for numbers, abbreviations and difficult names while retaining their display spellings.
+   For v9 CTA, speak “Hãy Cùng Bắt Đầu AI” in Vietnamese while displaying HCDB AI; speak and display “AI Lens” in English. Invite viewers to follow and interact for an episode-specific reason. The on-screen Like, Subscribe and bell clicks do not require those button names in the narration. Preserve the older CTA wording for existing jobs.
 2. Add restrained delivery tags and punctuation for clear, emphasized technology explanation. Keep visual instructions outside the TTS input.
 3. Use eleven_v3; start with Natural delivery unless configured otherwise. Use the supplied language-appropriate voice ID, never an invented example ID.
 4. If the ElevenLabs client is configured, generate a coherent narration take. Otherwise deliver prepared text and required configuration only.

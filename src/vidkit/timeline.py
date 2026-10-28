@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Any
 
 from .captions import build_caption_cues
 from .motion import compile_events
+from .channels import cta_props
 
 
 SCENE_TYPES = ["hook", "screenshot", "steps", "takeaway", "brand-hook", "screenshot-focus",
@@ -56,6 +58,12 @@ def compile_storyboard(
     audio_src: str,
     caption_plan: dict[str, Any] | None = None,
     library_entries: list[dict[str, Any]] | None = None,
+    require_cta: bool = False,
+    center_visuals: bool = False,
+    require_background: bool = False,
+    require_background_stack: bool = False,
+    channel_cta: dict[str, Any] | None = None,
+    engagement_cta: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     words = transcript.get("words", [])
     if not words:
@@ -63,6 +71,15 @@ def compile_storyboard(
     scenes = storyboard.get("scenes")
     if not isinstance(scenes, list) or not scenes:
         raise ValueError("Storyboard must contain at least one scene")
+    if require_cta and (not isinstance(scenes[-1], dict) or scenes[-1].get("role") != "cta" or
+                        any(isinstance(scene, dict) and scene.get("role") == "cta" for scene in scenes[:-1])):
+        raise ValueError("v5 storyboard needs exactly one final CTA scene")
+    if require_cta and (scenes[-1].get("layout") != "custom" or not scenes[-1].get("component")):
+        raise ValueError("v5 CTA needs a custom visual component")
+    expected_cta_component = "channel-cta-strip" if engagement_cta else "channel-cta"
+    if channel_cta is not None and (scenes[-1].get("component") != expected_cta_component
+                                    or scenes[-1].get("layout") != "custom"):
+        raise ValueError(f"Final CTA must use the {expected_cta_component} component")
     assets = {item.get("id"): item for item in asset_manifest.get("assets", [])}
     compiled: list[dict[str, Any]] = []
     missing_assets: list[str] = []
@@ -119,13 +136,15 @@ def compile_storyboard(
         compiled.append(
             {
                 "id": str(scene.get("id") or f"scene-{index + 1}"),
+                **({"visualAlignment": "centered"} if center_visuals else {}),
+                **({"role": scene["role"]} if scene.get("role") else {}),
                 "layout": layout,
                 "purpose": _nfc(str(scene.get("purpose") or "")),
                 "title": _nfc(str(scene.get("title") or "")),
                 "body": _nfc(str(scene.get("body") or "")),
                 "startWord": start_index,
                 "endWord": end_index,
-                "startMs": 0 if index == 0 else round(float(words[start_index]["start"]) * 1000),
+                "startMs": _scene_start_ms(scene.get("startAnchor"), words, start_index, index),
                 "endMs": 0,
                 "status": "blocked" if required_asset and asset is None else "checked",
                 "asset": asset,
@@ -136,7 +155,9 @@ def compile_storyboard(
                 "component": component_entry.get("baseComponent", component_id) if component_entry else component_id,
                 "componentId": component_id,
                 "componentVersion": component_version,
-                "componentProps": scene.get("componentProps", {}),
+                "componentProps": {**scene.get("componentProps", {}),
+                                   **(cta_props(language) if channel_cta is not None and scene.get("role") == "cta"
+                                      else {})},
                 "entities": scene.get("entities", []),
                 "continuityGroup": scene.get("continuityGroup"),
                 "outgoing": scene.get("outgoing"),
@@ -156,9 +177,20 @@ def compile_storyboard(
     duration_ms = _duration_ms(transcript, words)
     for index, scene in enumerate(compiled):
         scene["endMs"] = compiled[index + 1]["startMs"] if index + 1 < len(compiled) else duration_ms
+        if index == len(compiled) - 1 and scene.get("componentId") == "channel-cta-strip":
+            # The video already rounds up to a full frame; hold CTA through it.
+            scene["endMs"] = ((duration_ms * 30 + 999) // 1000) * 1000 / 30
+        if require_cta and scene.get("role") == "cta" and scene["endMs"] - scene["startMs"] < 2000:
+            raise ValueError("Final CTA needs at least 2 seconds of narration-timed screen time")
+        if channel_cta is not None and scene.get("role") == "cta":
+            minimum_ms = 5000 if engagement_cta else 4000
+            if scene["endMs"] - scene["startMs"] < minimum_ms:
+                raise ValueError(f"CTA needs at least {minimum_ms / 1000:g} seconds for its clicks")
         if storyboard.get("schemaVersion") == 4:
             scene["absoluteStartFrame"] = round(scene["startMs"] / 1000 * 30)
             scene["events"] = compile_events({**scene, "events": scenes[index].get("events", [])}, words)
+            if channel_cta is not None and not engagement_cta and scene.get("role") == "cta":
+                _validate_channel_cta_motion(scene, words, channel_cta)
             group = scene.get("continuityGroup")
             if group:
                 previous = compiled[index - 1] if index else None
@@ -225,13 +257,28 @@ def compile_storyboard(
                              "sha256": theme_entry["sha256"]} if theme_entry else None
     if theme_entry and theme_entry.get("style"):
         timeline["themeData"] = theme_entry["style"]
+    if require_background_stack:
+        from .backgrounds import resolve
+        timeline.update(resolve(storyboard.get("background"), library_entries or []))
+    elif require_background:
+        background_id = storyboard.get("backgroundId")
+        background_entry = next((item for item in reversed(library_entries or [])
+                                 if item.get("kind") == "background" and item.get("id") == background_id), None)
+        if not background_entry:
+            raise ValueError(f"Unknown background: {background_id}")
+        if background_entry.get("status") == "candidate" and not background_entry.get("previewValid"):
+            raise ValueError(f"Background {background_id} candidate requires a rendered motion preview")
+        timeline["backgroundId"] = background_id
+        timeline["backgroundLoopSeconds"] = background_entry["loopSeconds"]
+        timeline["backgroundLock"] = {"id": background_id, "version": background_entry["version"],
+                                      "sha256": background_entry["sha256"]}
     timeline["componentLocks"] = [
         {"id": scene["componentId"], "version": scene["componentVersion"],
          "sha256": next((item.get("sha256") for item in (library_entries or [])
                          if item.get("id") == scene["componentId"] and item.get("version") == scene["componentVersion"]), None)}
         for scene in compiled
     ]
-    effect_ids = {"bits-gradient-transition"}
+    effect_ids = set() if require_background or require_background_stack else {"bits-gradient-transition"}
     if any(scene["component"] == "brand-hook" for scene in compiled):
         effect_ids.add("bits-animated-text")
     if any(scene["component"] == "metric-breakdown" for scene in compiled):
@@ -246,14 +293,54 @@ def compile_storyboard(
     return timeline, missing_assets
 
 
-def validate_storyboard_shape(payload: dict[str, Any]) -> list[str]:
+def validate_storyboard_shape(payload: dict[str, Any], *, require_cta: bool = False,
+                              require_background: bool = False,
+                              require_background_stack: bool = False,
+                              require_channel_cta: bool = False,
+                              require_engagement_cta: bool = False) -> list[str]:
     errors: list[str] = []
+    if require_background_stack:
+        from .backgrounds import normalize
+        try:
+            normalize(payload.get("background"))
+        except ValueError as exc:
+            errors.append(str(exc))
     if payload.get("schemaVersion") not in {1, 3, 4}:
         errors.append("schemaVersion must be 1, 3 or 4")
+    if require_background and not isinstance(payload.get("backgroundId"), str):
+        errors.append("v7 storyboard needs backgroundId")
     scenes = payload.get("scenes")
     if not isinstance(scenes, list) or not scenes:
         errors.append("scenes must be a non-empty list")
         return errors
+    if require_cta and (not isinstance(scenes[-1], dict) or scenes[-1].get("role") != "cta" or
+                        sum(isinstance(scene, dict) and scene.get("role") == "cta" for scene in scenes) != 1):
+        errors.append("v5 storyboard needs exactly one final CTA scene")
+    elif require_cta and (scenes[-1].get("layout") != "custom" or not scenes[-1].get("component")):
+        errors.append("v5 CTA needs a custom visual component")
+    if require_engagement_cta and isinstance(scenes[-1], dict):
+        last = scenes[-1]
+        if last.get("component") != "channel-cta-strip" or last.get("layout") != "custom":
+            errors.append("v9 final CTA must use channel-cta-strip")
+        if len(str(last.get("title", ""))) > 90 or len(str(last.get("body", ""))) > 60:
+            errors.append("v9 CTA title/body must fit 90/60 characters")
+        if last.get("events"):
+            errors.append("v9 CTA click timing is derived from the scene duration; omit events")
+    elif require_channel_cta and isinstance(scenes[-1], dict):
+        last = scenes[-1]
+        if last.get("component") != "channel-cta" or last.get("layout") != "custom":
+            errors.append("v8 final CTA must use channel-cta")
+        if len(str(last.get("title", ""))) > 90 or len(str(last.get("body", ""))) > 60:
+            errors.append("v8 CTA title/body must fit 90/60 characters")
+        events = last.get("events", [])
+        if not isinstance(events, list) or {event.get("id") for event in events if isinstance(event, dict)} != {
+            "like-click", "subscribe-click"} or len(events) != 2:
+            errors.append("v8 CTA needs like-click and subscribe-click word-anchored events")
+    elif require_cta and isinstance(scenes[-1], dict):
+        if (not str(scenes[-1].get("body", "")).strip() or
+                len(str(scenes[-1].get("body", ""))) > 60 or
+                len(str(scenes[-1].get("title", ""))) > 90):
+            errors.append("v5 CTA needs follow text of at most 60 characters and a question title of at most 90")
     seen: set[str] = set()
     for index, scene in enumerate(scenes):
         label = f"scene {index + 1}"
@@ -268,7 +355,7 @@ def validate_storyboard_shape(payload: dict[str, Any]) -> list[str]:
         seen.add(scene_id)
         if scene.get("layout") not in SCENE_TYPES and not (payload.get("schemaVersion") == 4 and scene.get("layout") == "custom"):
             errors.append(f"{label} layout must be one of: {', '.join(SCENE_TYPES)}")
-        if not isinstance(scene.get("title"), str) or not scene["title"].strip():
+        if not isinstance(scene.get("title"), str) or (not scene["title"].strip() and scene.get("component") != "channel-cta-strip"):
             errors.append(f"{label} title is required")
         for anchor_name in ("startAnchor", "endAnchor"):
             anchor = scene.get(anchor_name)
@@ -295,6 +382,23 @@ def validate_storyboard_shape(payload: dict[str, Any]) -> list[str]:
         except (TypeError, ValueError) as exc:
             errors.append(str(exc))
     return errors
+
+
+def _scene_start_ms(anchor: dict[str, Any], words: list[dict[str, Any]],
+                    word_index: int, scene_index: int) -> int:
+    # A negative offset can reveal a scene during the existing inter-word pause.
+    # It cannot remove speech from the preceding scene or change STT timestamps.
+    offset = anchor.get("offsetMs", 0)
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset > 0:
+        raise ValueError("startAnchor.offsetMs must be a non-positive integer")
+    if scene_index == 0:
+        if offset:
+            raise ValueError("The first scene cannot have a start offset")
+        return 0
+    start = round(float(words[word_index]["start"]) * 1000) + offset
+    if offset and start < round(float(words[word_index - 1]["end"]) * 1000):
+        raise ValueError("Scene start offset overlaps the preceding spoken word")
+    return start
 
 
 def _anchor_index(anchor: Any, words: list[dict[str, Any]], name: str, scene_index: int) -> int:
@@ -372,6 +476,42 @@ def _duration_ms(transcript: dict[str, Any], words: list[dict[str, Any]]) -> int
 
 def _canonical(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def _cta_tokens(value: str) -> list[str]:
+    return re.findall(r"\w+", unicodedata.normalize("NFKC", value).casefold())
+
+
+def _cta_phrase_indexes(words: list[dict[str, Any]], scene: dict[str, Any], phrase: str) -> set[int]:
+    target = _cta_tokens(phrase)
+    stream = [(token, index) for index in range(scene["startWord"], scene["endWord"] + 1)
+              for token in _cta_tokens(str(words[index].get("text", "")))]
+    for start in range(len(stream) - len(target) + 1):
+        if [token for token, _ in stream[start:start + len(target)]] == target:
+            return {index for _, index in stream[start:start + len(target)]}
+    return set()
+
+
+def _validate_channel_cta_motion(scene: dict[str, Any], words: list[dict[str, Any]],
+                                 cta: dict[str, Any]) -> None:
+    events = {event["id"]: event for event in scene["events"]}
+    if set(events) != {"like-click", "subscribe-click"}:
+        raise ValueError("v8 CTA needs exactly like-click and subscribe-click events")
+    like, subscribe = events["like-click"], events["subscribe-click"]
+    if like.get("entityId") != "like" or subscribe.get("entityId") != "subscribe":
+        raise ValueError("v8 CTA click events must target their matching buttons")
+    for event, phrase_key in ((like, "likePhrase"), (subscribe, "subscribePhrase")):
+        phrase = cta.get(phrase_key)
+        if not isinstance(phrase, str) or event.get("wordIndex") not in _cta_phrase_indexes(words, scene, phrase):
+            raise ValueError(f"v8 CTA {event['id']} word anchor must match {phrase_key} in transcript")
+        if event.get("durationFrames", 0) < 8:
+            raise ValueError(f"v8 CTA {event['id']} needs at least 8 frames for a visible press")
+    start = scene["absoluteStartFrame"]
+    end = round(scene["endMs"] / 1000 * 30)
+    if like["atFrame"] - start < 18 or subscribe["atFrame"] - like["atFrame"] < 18:
+        raise ValueError("v8 CTA needs button reveal before Like and space between clicks")
+    if subscribe["endFrame"] + 18 > end:
+        raise ValueError("v8 CTA needs at least 18 frames holding the Subscribed state")
 
 
 def _nfc(value: str) -> str:
